@@ -1,0 +1,4 @@
+# Machine-local datasets, symlinks, and generated trace files.
+/*
+!/.gitignore
+!/README

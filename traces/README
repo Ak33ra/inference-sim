@@ -1,0 +1,51 @@
+Local research traces
+=====================
+
+Use this directory as the common entry point for project workflows. Datasets
+may be stored here directly or symlinked from scratch/another disk. Everything
+under traces/ is ignored by Git except this README and .gitignore, including
+symlinks: each collaborator supplies their own local data location.
+
+FreeInference
+-------------
+
+Dataset: https://huggingface.co/datasets/harvardMadsys/freeinference_agentic_trace
+Pinned revision: 16d3c04dae6ccaa0c48a9064e204e3a8f1eb9ade
+
+The shared project path is:
+
+    traces/freeinference_agentic_trace/release/<week>/
+
+From the repository root, link an existing download (replace the absolute path
+with your own). The download root must contain release/, so link the download
+root rather than release/ itself:
+
+    ln -s /absolute/path/to/freeinference_agentic_trace traces/freeinference_agentic_trace
+
+Alternatively, download or copy the dataset into traces/freeinference_agentic_trace/
+with the same layout. Do not commit datasets or machine-specific symlinks.
+
+Expected layout, using one week as an example:
+
+    traces/freeinference_agentic_trace/release/2026-08-09_2026-08-15/
+        manifest.json
+        processed/
+            requests.parquet
+            sessions.parquet
+            tool_calls.parquet
+            tables.json
+        traces/
+            YYYY-MM-DD.jsonl.zst
+
+The release contains 16 weekly directories. Keep the original compressed files
+and Parquet tables; linking them does not require copying or decompressing data.
+Workflows should resolve traces/ relative to the repository root and use the
+shared path above, rather than embedding a collaborator's scratch path.
+
+Check local setup from the repository root:
+
+    test -r traces/freeinference_agentic_trace/release/2026-08-09_2026-08-15/processed/requests.parquet
+    git check-ignore traces/freeinference_agentic_trace
+
+This is the source dataset location. A FreeInference adapter is still needed
+before these files can be replayed through BLIS.
