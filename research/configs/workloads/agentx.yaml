@@ -1,0 +1,16 @@
+# Shared AgentX semantics. Named experiments supply the load and seed overrides.
+scenario: inferencex-agentx-mvp
+harness_version: "0.12.0"
+concurrency: 1
+random_seed: 42
+benchmark_duration_s: 900
+grace_period_s: 30
+max_context_length: max_model_len
+split_flattened_agents: false
+cache_bust: first_turn_prefix
+system_idle_gap_cap_s: 10
+trajectory_start:
+  min_ratio: 0
+  max_ratio: 1
+warmup:
+  mode: synthesized

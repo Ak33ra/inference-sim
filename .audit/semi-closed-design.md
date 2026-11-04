@@ -1,0 +1,21 @@
+# Implementation contract
+
+Use a dedicated finite driver in `sim/workload/semiclosed`, with a thin command adapter in `cmd/replay_semiclosed.go`. Add only the selection, callback, and reporting branches needed in `cmd/replay.go`. Preserve AgentX, TraceV2, routing, serving engines, and the existing research launcher defaults.
+
+Load the existing conversion directory with its manifest, Weka corpus, and audit. Verify the manifest's artifact hashes and sizes, then join records by family/session/step and check identities, times, token counts, topology, prefix coverage, and manifest totals. Convert these inputs once into private immutable families and requests with reverse dependency lists. Runtime state has one owner and explicit pending, scheduled, issued, completed, failed, blocked, and censored states.
+
+Each root starts at its recorded origin minus the earliest selected root origin. There is no cap, recycling, sampling, warmup, or idle compression. Materialize tokens only at dispatch. Preserve absolute prompt lengths, zero output counts, mapped 64-token prefix identities, and request-specific unknown suffixes. Do not add chat-template tokens. A client budget of max(1, output_count) can avoid zero-budget autofill without changing the output slice's recorded length.
+
+Ordinary turns wait for the previous completion and the recorded end-to-start gap. Post-response children wait for their spawning request's completion plus the recorded spawn gap. A child recorded inside the spawning request is released from the parent's actual send plus the recorded send offset. Reject malformed negative timing instead of clamping.
+
+Preserve the existing converter's timing-inferred join convention and label it as an assumption in results. For a joined parent turn, wait for the previous parent request and all required child terminal requests, then add `next_recorded_start - max(previous_recorded_end, required_child_recorded_ends)`. Do not also preserve the full preceding parent gap, which would count the observed child wait twice. An optional no-join policy is a small sensitivity control, not a second runtime.
+
+Use the existing cluster hooks. Resolve completion identity by request ID, including P/D copies. Terminal callbacks must be idempotent. A failed prerequisite blocks its unsent dependent work; issued independent/overlapping work drains. Finish reports any remaining work as censored. Report failed/blocked/censored counts and source-token budgets separately from actual engine tokens. Successful drain requires every selected request to complete and actual engine input/output totals to equal original selected totals.
+
+Keep workload accounting, family/session arrival/completion times, complete-family makespan, and trace provenance in a separate JSON report. Standard `--metrics-path` remains the engine report. Save reports before returning a failure for incomplete replay or accounting disagreement. Natural drain is the default. If a user horizon is supported, it must be explicit and produce censored results; never derive a short horizon from root arrivals.
+
+The smallest public boundary is Load, NewReplay, Start, Gate, OnComplete, OnUnserved, Finish, and Summary. Do not expose AgentX internals, add a generic plugin registry, or add another Python conversion pipeline.
+
+Validation must exercise the actual cluster. Compare a fixed cohort against AgentX with initial ratio zero, disabled idle caps, suppressed recycling at the test boundary, matched prompt arrays before service, and matched measurement end. Compare per-request arrivals/completions/TTFT/E2E and aggregate engine metrics. Do not infer metric parity from a post-hoc prompt-count projection. Use separate causal tests for positive join residuals, staggered births, overlapping children, background children, failures, zero outputs, and P/D callbacks.
+
+Run the existing tests plus an actual two-replica GLM-5.2 CLI drain of `research/outputs/semiclosed-source-smoke`. Compare with `parquet-reference.json`, independently summed from the original Parquet data. Keep the implementation readable and documented under `research/semiclosed`, including exact commands, inference assumptions, exclusions, and token definitions.

@@ -1,0 +1,55 @@
+{
+  "artifacts": {
+    "audit.jsonl": {
+      "bytes": 6768,
+      "sha256": "b1b90c497fffcad4d34a7903ab7f24fedb5f2a697450184cacb115d1469036d9"
+    },
+    "corpus.jsonl": {
+      "bytes": 1752,
+      "sha256": "35f87a24c9f15cd17f1b53a3edef9f906be78ba88e2a37d861ff06099c3bf8ea"
+    }
+  },
+  "counts": {
+    "excluded_families": 0,
+    "excluded_requests": 0,
+    "source_families": 2,
+    "source_requests": 12
+  },
+  "format_version": 1,
+  "included": {
+    "background_child_sessions": 0,
+    "child_sessions": 4,
+    "children_starting_before_parent_end": 0,
+    "completion_tokens": 36,
+    "families": 2,
+    "fanout_groups": 2,
+    "inferred_group_join_residual_ms": 0,
+    "mapped_blocks": 30,
+    "mapped_shared_with_previous_tokens": 896,
+    "positive_spawn_gap_ms": 0,
+    "prompt_contractions": 0,
+    "prompt_tokens": 1920,
+    "requests": 12,
+    "requests_without_mapped_blocks": 0,
+    "sequential_gap_ms": 4,
+    "sequential_gaps": 6,
+    "sequential_gaps_over_10s": 0,
+    "sessions": 6,
+    "source_blocks": 120,
+    "source_groups_clipped_to_prompt": 0,
+    "source_shared_with_previous_tokens": 896,
+    "source_trailing_blocks": 0,
+    "spawn_groups": 2,
+    "unmapped_prompt_tokens": 0,
+    "zero_output_requests": 0
+  },
+  "selection": {
+    "model": "m",
+    "weeks": [
+      "fixture"
+    ]
+  },
+  "source": {
+    "dataset": "synthetic-test-fixture"
+  }
+}

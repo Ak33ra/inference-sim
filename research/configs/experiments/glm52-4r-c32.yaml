@@ -1,0 +1,12 @@
+# Candidate for replica comparisons; load calibration is pending.
+version: 1
+input: ../../outputs/glm52-pilot
+corpus_sha256: 12edd72cd9e59f42c8d04cea2240af25d4709c4dfadacb96c3241d493712394b
+scenario: ../clusters/glm-5.2-b200-tp8-4replicas.yaml
+workload: ../workloads/agentx.yaml
+defaults: ../../../defaults.yaml
+num_instances: 4
+concurrency: 32
+seed: 42
+duration: 900s
+server_series_interval_s: 1

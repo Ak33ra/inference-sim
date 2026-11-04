@@ -1,0 +1,32 @@
+# Exploratory serving shape; load calibration is pending.
+kind: Scenario
+name: glm-5.2-b200-tp8-4replicas
+engine_version: "0.31.0"
+model: glm-5.2-fp8
+coefficients: [cost-model-primitives, cost-model-collectives, cost-model-host-overheads, cost-model-attention, cost-model-recurrent, cost-model-memory]
+cluster:
+  hardware: b200
+  fabric: ib-400g
+  nodes: 4
+  gpus_per_node: 8
+---
+kind: Deployment
+name: glm-5.2-b200-tp8-4replicas
+pools:
+  - role: colocated
+    nodes: 4
+    parallel:
+      tp: 8
+      pp: 1
+      dp: 1
+      enable_expert_parallel: false
+    engine:
+      quantization: fp8
+      cache_dtype: fp8
+      block_size: 64
+      max_num_batched_tokens: 8192
+      max_num_seqs: 32
+      max_model_len: 1048576
+      cudagraph_mode: PIECEWISE
+      gpu_memory_utilization: 0.9
+      enable_prefix_caching: true

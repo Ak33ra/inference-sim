@@ -18,6 +18,7 @@ import (
 	"github.com/inference-sim/inference-sim/sim/cluster"
 	"github.com/inference-sim/inference-sim/sim/trace"
 	"github.com/inference-sim/inference-sim/sim/workload"
+	"github.com/inference-sim/inference-sim/sim/workload/semiclosed"
 )
 
 var (
@@ -70,10 +71,13 @@ Example:
 		}
 		logrus.SetLevel(level)
 		validateRouterFlags()
+		if err := validateSemiClosedFlags(cmd); err != nil {
+			logrus.Fatalf("%v", err)
+		}
 
 		// Validate required inputs (BC-6, BC-8). An agentic replay (#1937) reads its
 		// corpus instead of a TraceV2 file.
-		if !agentXRequested() {
+		if !agentXRequested() && semiClosedInput == "" {
 			if traceHeaderPath == "" {
 				logrus.Fatalf("--trace-header is required")
 			}
@@ -97,9 +101,17 @@ Example:
 		// Load trace (BC-1). An agentic replay builds its driver from the corpus instead
 		// and carries an empty generated-mode header through the shared path below.
 		var agx *agentXRun
+		var semiClosed *semiclosed.Replay
 		var agxInitial []*sim.Request
 		var traceData *workload.TraceV2
-		if agentXRequested() {
+		if semiClosedInput != "" {
+			semiClosed, err = buildSemiClosedRun()
+			if err != nil {
+				logrus.Fatalf("semi-closed replay: %v", err)
+			}
+			traceData = &workload.TraceV2{Header: workload.TraceHeader{Version: 3, TimeUnit: "microseconds", Mode: "generated"}}
+			replaySessionMode = "semi-closed"
+		} else if agentXRequested() {
 			agx, agxInitial = buildAgentXRun(cmd)
 			traceData = &workload.TraceV2{Header: workload.TraceHeader{Version: 3, TimeUnit: "microseconds", Mode: "generated"}}
 			replaySessionMode = "agentic"
@@ -132,7 +144,7 @@ Example:
 		// the growing accumulate-delta input reconstructed like "closed-loop". It is the
 		// only faithful replay mode for a high-concurrency agentic corpus — see the guards
 		// and request-building branch below.
-		if replaySessionMode != "fixed" && replaySessionMode != "closed-loop" && replaySessionMode != "fixed-accumulate" && agx == nil {
+		if replaySessionMode != "fixed" && replaySessionMode != "closed-loop" && replaySessionMode != "fixed-accumulate" && agx == nil && semiClosed == nil {
 			logrus.Fatalf("--session-mode must be \"fixed\", \"closed-loop\", or \"fixed-accumulate\", got %q", replaySessionMode)
 		}
 		if replayThinkTimeMs < 0 {
@@ -237,6 +249,8 @@ Example:
 		var sessionMgr *workload.SessionManager
 		var poolDriver *workload.SessionPoolDriver
 		switch replaySessionMode {
+		case "semi-closed":
+			requests = semiClosed.Start()
 		case "agentic":
 			// The agentic driver issues every request itself (#1937): the warm-up's
 			// initial sends now, the rest as follow-ups and gated sends.
@@ -320,7 +334,7 @@ Example:
 		if cmd.Flags().Changed("horizon") {
 			replayHorizon = simulationHorizon
 		}
-		if (replayConcurrentSessions > 0 || agx != nil) && !cmd.Flags().Changed("horizon") {
+		if (replayConcurrentSessions > 0 || agx != nil || semiClosed != nil) && !cmd.Flags().Changed("horizon") {
 			replayHorizon = math.MaxInt64 // self-draining pool / agentic replay sets its own end
 		}
 		logrus.Infof("Simulation horizon: %d ticks", replayHorizon)
@@ -342,7 +356,7 @@ Example:
 		// generated traces remain header-authoritative (INV-13). An agentic replay has no
 		// trace, so no recorded deployment: the scenario's offload block is its tiers.
 		kvOffloadCfg := reconcileReplayKVOffload(cmd, traceData.Header.KVOffload,
-			!replayRecordsDeployment(traceData.Header, agx != nil))
+			!replayRecordsDeployment(traceData.Header, agx != nil || semiClosed != nil))
 		// #1590 (H1): parity with run — the multi-tier offload chain (from the trace
 		// header or --kv-offload-config) and the legacy --kv-cpu-blocks single CPU tier
 		// are distinct offload models; refuse both with a clean CLI error rather than
@@ -438,6 +452,9 @@ Example:
 		}
 		if err := cluster.ValidatePoolTopology(prefillInstances, decodeInstances, prefillDecodeInstances, encodeInstances, numInstances); err != nil {
 			logrus.Fatalf("Invalid PD pool topology: %v", err)
+		}
+		if err := validateSemiClosedDeployment(semiClosed, prefillInstances, decodeInstances, prefillDecodeInstances); err != nil {
+			logrus.Fatalf("%v", err)
 		}
 
 		// DP-as-placement plan DECISION (#1531/#1556, #1553), as runCmd makes it.
@@ -554,7 +571,20 @@ Example:
 			}
 		}
 		var onRequestDone func(*sim.Request, int64) []*sim.Request
+		var cs *cluster.ClusterSimulator
 		switch {
+		case semiClosed != nil:
+			onRequestDone = func(req *sim.Request, clock int64) []*sim.Request {
+				if req.State == sim.StateCompleted {
+					for _, inst := range cs.Instances() {
+						if at, ok := inst.Metrics().RequestCompletionTimes[req.ID]; ok {
+							clock = max(clock, int64(at))
+							break
+						}
+					}
+				}
+				return semiClosed.OnComplete(req, clock)
+			}
 		case agx != nil:
 			onRequestDone = agx.driver.OnComplete
 		case poolDriver != nil:
@@ -572,11 +602,15 @@ Example:
 				return followUps
 			}
 		}
-		cs := cluster.NewClusterSimulator(config, cluster.NewSliceRequestSource(requests), onRequestDone)
+		cs = cluster.NewClusterSimulator(config, cluster.NewSliceRequestSource(requests), onRequestDone)
 		// INV-13: the router the trace was recorded with, unless the command line names one.
 		router := reconcileReplayRouter(cmd, traceData.Header.Router)
 		gw := newGateway(router, model)
 		cs.SetGateway(gw)
+		if semiClosed != nil {
+			cs.SetArrivalGate(semiClosed.Gate)
+			cs.SetUnservedHook(semiClosed.OnUnserved)
+		}
 		if agx != nil {
 			cs.SetArrivalGate(agx.driver.Gate)
 			cs.SetUnservedHook(agx.driver.OnUnserved)
@@ -590,8 +624,16 @@ Example:
 			logrus.Fatalf("%v", satErr)
 		}
 
-		if err := cs.Run(); err != nil {
-			logrus.Fatalf("Replay simulation failed: %v", err)
+		runErr := cs.Run()
+		var semiClosedErr error
+		if semiClosed != nil {
+			semiClosedErr = finishSemiClosedRun(semiClosed, cs.Clock(), cs.AggregatedMetrics(), runErr)
+		}
+		if runErr != nil {
+			if semiClosedErr != nil {
+				logrus.Fatalf("%v", semiClosedErr)
+			}
+			logrus.Fatalf("Replay simulation failed: %v", runErr)
 		}
 		if agx != nil {
 			agx.driver.Finish(cs.Clock())
@@ -842,6 +884,9 @@ Example:
 			logrus.Infof("Trace exported: %s.yaml, %s.csv (%d records)", replayTraceOutput, replayTraceOutput, len(records))
 		}
 
+		if semiClosedErr != nil {
+			logrus.Fatalf("%v", semiClosedErr)
+		}
 		logrus.Info("Replay complete.")
 	},
 }
@@ -857,6 +902,7 @@ func init() {
 	// Saturation trace flags (#1516): --detectors + --saturation-config + --saturation-report.
 	registerDetectorFlags(replayCmd)
 	registerAgentXReplayFlags(replayCmd)
+	registerSemiClosedReplayFlags(replayCmd)
 
 	replayCmd.Flags().StringVar(&replaySessionMode, "session-mode", "fixed", `Session replay mode: "fixed" (pre-baked arrivals from trace), "closed-loop" (load-adaptive follow-ups via SessionManager), or "fixed-accumulate" (recorded arrivals + reconstructed accumulate-delta inputs; faithful replay of high-concurrency agentic corpora, #1692)`)
 	replayCmd.Flags().IntVar(&replayThinkTimeMs, "think-time-ms", 0, "Override think time between session rounds in milliseconds (0 = derive from trace inter-round arrival gaps; mutually exclusive with --think-time-dist; requires --session-mode closed-loop)")

@@ -1,0 +1,4 @@
+time	decision	reason	evidence
+2026-11-03T22:04:33.052800+00:00	Wrap existing converter/replay/verifier in one Bash entry point	User wants invocable smoke, verification and full replay; no engine change needed	research/semiclosed/README.md; research/freeinference_trace/__main__.py
+2026-11-03T22:04:33.052823+00:00	Full defaults to all available weeks for one model	Existing converter and deployment represent one model; exclusions remain manifest-visible	research/freeinference_trace/pipeline.py; research/configs/clusters/glm-5.2-b200-tp8-2replicas.yaml
+2026-11-03T22:08:43.299373+00:00	Verify actual checks and read-only verification	Prove It Works with real 175-request replay, original-source parity, error propagation, and cwd/path handling	research/outputs/semiclosed/runner checks 20261103/runner-validation.json

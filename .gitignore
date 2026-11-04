@@ -47,6 +47,7 @@ __pycache__/*
 !specs/**/*.json
 !cmd/testdata/**/*.json
 !sim/workload/testdata/agentx/*.json
+!sim/workload/semiclosed/testdata/*/manifest.json
 data/
 *.txt
 
