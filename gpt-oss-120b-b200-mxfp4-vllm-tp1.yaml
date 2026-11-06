@@ -1,0 +1,65 @@
+# gpt-oss-120b (MoE) on one B200, TP1, under vLLM v0.31.0: the deployment the
+# gptoss-poc1 fan-out traces were generated on (catalyst-fleet1, 2026-10-28), for
+# `blis replay --agentic-scenario inferencex-agentx-mvp`.
+#
+# Every engine setting is the one that server ran with, read from its start-up log:
+#   quantization mxfp4       vLLM resolved the checkpoint's own format as gpt_oss_mxfp4
+#                            (FLASHINFER_TRTLLM_MXFP4_BF16 MoE backend). The latency kernel
+#                            prices that spelling only as "mxfp4" (servedDType, blis-latency-kernel
+#                            v0.3.0 new.go), and the model graph's weight_dtype is mxfp4.
+#   cache_dtype auto         kv_cache_dtype=auto, i.e. bf16 KV (the model's compute dtype).
+#   block_size 16            "kv lcm block sizes 16" (FlashInfer attention backend).
+#   max_num_batched_tokens   16384, logged ("Chunked prefill is enabled with
+#                            max_num_batched_tokens=16384"); vLLM's default on a >=160 GiB part.
+#   max_num_seqs 1024        not passed, so vLLM's default for a >=70 GiB non-A100 part
+#                            (the same rule BLIS's defaultMaxNumSeqs reproduces).
+#   max_model_len 131072     passed; gpt-oss-120b's full window. --max-context-length
+#                            max_model_len therefore drops nothing from the gptoss corpora.
+#   cudagraph_mode           FULL_AND_PIECEWISE, logged (v0.31.0's default).
+#   gpu_memory_utilization   0.85, passed (the box is shared).
+#   prefix caching           on, passed.
+#
+# Differences from the kernel's scored gpt-oss-120b-b200-fp4-vllm-tp1 fixture (AISimulate):
+# it states quantization nvfp4, cache_dtype fp8, max_num_batched_tokens 8192,
+# max_num_seqs 256, max_model_len 32768, cudagraph_mode PIECEWISE and
+# gpu_memory_utilization 0.92, held fixed for score comparability rather than taken from a
+# run. On B200 the kernel prices mxfp4 and nvfp4 on the same FP4 peak and fitted GEMM
+# efficiency (dtypeFit); they differ only in scale bytes (E8M0 per 32 elements vs FP8 per
+# 16). To compare against the scored fixture, set quantization: nvfp4 and the values above.
+#
+# The scored workloads for this model are single-turn (1k1k, 1k8k, 8k1k); agentic contexts
+# up to 131k and prefix-cache-heavy batches lie outside them, so absolute latencies here
+# are estimates (see docs/reference/models.md).
+kind: Scenario
+name: gpt-oss-120b-b200-mxfp4-vllm-tp1
+engine_version: "0.31.0"
+
+model: gpt-oss-120b
+coefficients: [cost-model-primitives, cost-model-collectives, cost-model-host-overheads, cost-model-attention, cost-model-recurrent, cost-model-memory]
+
+cluster:
+  hardware: b200
+  nodes: 1
+  gpus_per_node: 8
+---
+kind: Deployment
+name: gpt-oss-120b-b200-mxfp4-vllm-tp1
+
+pools:
+  - role: colocated
+    nodes: 1
+    parallel:
+      tp: 1
+      pp: 1
+      dp: 1
+      enable_expert_parallel: false
+    engine:
+      quantization: mxfp4
+      cache_dtype: auto
+      block_size: 16
+      max_num_batched_tokens: 16384
+      max_num_seqs: 1024
+      max_model_len: 131072
+      cudagraph_mode: FULL_AND_PIECEWISE
+      gpu_memory_utilization: 0.85
+      enable_prefix_caching: true
