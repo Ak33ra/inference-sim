@@ -76,6 +76,88 @@ class ConfigRunTests(unittest.TestCase):
         self.assertEqual(plan.resolved["python_argv"], (sys.executable, "-B"))
         self.assertFalse(plan.output.exists())
 
+    def test_dag_input_arrivals_and_independent_verification(self):
+        source = self.root / "synthetic.jsonl.zst"
+        source.write_bytes(b"test")
+        self.config["trace"] = {"format": "weka-dag", "path": "../synthetic.jsonl.zst"}
+        self.config["run"] = {"seed": 7, "arrivals": {"mode": "poisson", "rate_per_s": 2}}
+        plan = self.plan()
+        copy, build, replay, verify = plan.commands
+        self.assertEqual(copy[-2:], (str(source), str(plan.output / "input.jsonl.zst")))
+        self.assertEqual(replay[replay.index("--semi-closed-join-policy") + 1], "explicit")
+        self.assertEqual(replay[replay.index("--semi-closed-arrival-rate") + 1], "2")
+        self.assertEqual(replay[replay.index("--semi-closed-arrival-seed") + 1], "7")
+        self.assertIn(str(REPOSITORY / "research/semiclosed/verify_dag.py"), verify)
+        self.assertNotIn("--source", verify)
+        self.assertNotIn("--week", copy)
+        self.assertEqual(plan.resolved["run"]["arrivals"], {"mode": "poisson", "rate_per_s": 2, "seed": 7})
+        self.config["run"]["join_policy"] = "none"
+        with self.assertRaisesRegex(ValueError, "explicit"):
+            self.plan()
+
+    def test_invalid_arrival_config_fails_before_output(self):
+        source = self.root / "synthetic.jsonl"
+        source.write_text("{}")
+        self.config["trace"] = {"format": "weka-dag", "path": "../synthetic.jsonl"}
+        for arrivals in ({"mode": "poisson"}, {"mode": "poisson", "rate_per_s": 0},
+                         {"mode": "fixed", "interval_s": -1}, {"mode": "fixed", "rate_per_s": 1},
+                         {"mode": "trace", "interval_s": 1}, {"mode": "unknown"},
+                         {"mode": "fixed", "seed": 2**63}):
+            with self.subTest(arrivals=arrivals):
+                self.config["run"] = {"arrivals": arrivals}
+                with self.assertRaisesRegex(ValueError, "arrivals"):
+                    self.plan()
+        self.assertFalse((self.root / "results/run").exists())
+
+    def test_mixed_dag_sources_resolve_without_changing_arrival_rate(self):
+        source = self.root / "synthetic.jsonl"
+        source.write_text("{}")
+        self.config["trace"] = {"format": "weka-dag", "sources": [
+            {"path": "../synthetic.jsonl", "copies": 3}, {"path": "../synthetic.jsonl"}]}
+        self.config["run"] = {"arrivals": {"mode": "fixed", "interval_s": .5}}
+        plan = self.plan()
+        self.assertEqual(plan.resolved["trace"]["sources"], [
+            {"path": str(source), "copies": 3}, {"path": str(source), "copies": 1}])
+        build, _, replay, verify = plan.commands
+        self.assertIn("research.semiclosed.mix", build)
+        self.assertIn("build", build)
+        self.assertEqual(build[-1], str(plan.output / "config.resolved.json"))
+        self.assertIn("research.semiclosed.mix", verify)
+        self.assertEqual(verify[verify.index("--manifest") + 1], str(plan.output / "composition.json"))
+        self.assertEqual(replay[replay.index("--semi-closed-arrival-interval-s") + 1], "0.5")
+        self.assertFalse(plan.output.exists())
+        self.config["trace"]["path"] = "../synthetic.jsonl"
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.plan()
+
+    def test_router_is_snapshotted_and_used_by_the_generated_deployment(self):
+        source = self.root / "picker.yaml"
+        text = "apiVersion: llm-d.ai/v1\nkind: EndpointPickerConfig\n"
+        source.write_text(text)
+        self.config["serving"]["router"] = {"endpoint_picker_config": "../picker.yaml"}
+        plan = self.plan()
+        _, deployment = map(json.loads, plan.scenario.split("---\n"))
+        self.assertEqual(deployment["router"], {"endpoint_picker_config": "router.yaml"})
+        self.assertEqual(plan.resolved["serving"]["router"]["endpoint_picker_config"], str(source))
+        self.assertFalse(plan.output.exists())
+        source.write_text("changed after planning")
+        self.assertEqual(execute(replace(plan, commands=())), 0)
+        self.assertEqual((plan.output / "router.yaml").read_text(), text)
+
+    def test_router_absence_preserves_defaults_and_invalid_paths_fail_early(self):
+        plan = self.plan()
+        _, deployment = map(json.loads, plan.scenario.split("---\n"))
+        self.assertNotIn("router", deployment)
+        self.assertNotIn("router", plan.resolved["serving"])
+        self.assertIsNone(plan.router_config)
+        for router in ({}, "jsq", {"endpoint_picker_config": "missing"},
+                       {"endpoint_picker_config": "../source"}, {"policy": "jsq"}):
+            with self.subTest(router=router):
+                self.config["serving"]["router"] = router
+                with self.assertRaisesRegex(ValueError, "serving.router"):
+                    self.plan()
+        self.assertFalse(plan.output.exists())
+
     def test_caller_overrides_and_environment_paths(self):
         del self.config["catalog"], self.config["registry"], self.config["python"]
         alias = self.root / "python-alias"

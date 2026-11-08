@@ -1,4 +1,4 @@
-// Package semiclosed replays a finite FreeInference corpus with recorded root
+// Package semiclosed replays finite agent workloads with independent root
 // arrivals and completion-driven continuations.
 package semiclosed
 
@@ -13,6 +13,7 @@ type JoinPolicy string
 const (
 	TimingInferred JoinPolicy = "timing-inferred"
 	NoJoins        JoinPolicy = "none"
+	ExplicitDAG    JoinPolicy = "explicit"
 )
 
 type Totals struct {
@@ -34,6 +35,9 @@ type Corpus struct {
 	originMs       int64
 	manifest       json.RawMessage
 	manifestSHA256 string
+	explicitDeps   []dependency
+	arrivalUs      []int64
+	rootOffsetsUs  map[int]int64
 }
 
 type family struct {

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "trace": {
+    "format": "weka-dag",
+    "path": "../../../natural-oolong-fanout.jsonl.zst"
+  },
+  "serving": {
+    "model": "gpt-oss-120b",
+    "cluster": {
+      "hardware": "b200",
+      "gpus_per_node": 1,
+      "tp": 1,
+      "replicas": 8,
+      "fabric": "ib-400g"
+    },
+    "engine": {
+      "quantization": "mxfp4",
+      "cache_dtype": "auto",
+      "block_size": 16,
+      "max_num_batched_tokens": 16384,
+      "max_num_seqs": 1024,
+      "max_model_len": 131072,
+      "cudagraph_mode": "FULL_AND_PIECEWISE",
+      "gpu_memory_utilization": 0.85,
+      "enable_prefix_caching": false
+    }
+  },
+  "run": {
+    "seed": 42,
+    "arrivals": {
+      "mode": "fixed",
+      "interval_s": 1
+    },
+    "series_interval_s": 1
+  },
+  "output": "../../outputs/semiclosed/natural-oolong-8nodes-nocache"
+}

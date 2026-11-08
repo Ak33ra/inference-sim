@@ -17,6 +17,7 @@ type Report struct {
 	FormatVersion       int                   `json:"format_version"`
 	JoinPolicy          JoinPolicy            `json:"join_policy"`
 	JoinAssumption      string                `json:"join_assumption"`
+	Arrivals            ArrivalConfig         `json:"arrivals"`
 	Complete            bool                  `json:"complete"`
 	AccountingMatch     bool                  `json:"accounting_match"`
 	Source              json.RawMessage       `json:"source"`
@@ -89,6 +90,10 @@ func (x *Replay) Summary() Report {
 		Source:         append(json.RawMessage(nil), c.manifest...), ManifestSHA256: c.manifestSHA256,
 		OriginMs: c.originMs, EndUs: x.endUs, Selected: c.totals, Engine: x.engine, EngineAvailable: x.engineAvailable,
 		States: make(map[State]int), SourceTokensByState: make(map[State]TokenTotals)}
+	r.Arrivals = x.arrivals
+	if x.policy == ExplicitDAG {
+		r.JoinAssumption = "explicit parent_ids are completion prerequisites; delays are recorded gaps after the latest parent completion"
+	}
 	for _, state := range []State{Pending, Scheduled, Issued, Completed, Failed, Blocked, Censored} {
 		r.States[state] = 0
 		r.SourceTokensByState[state] = TokenTotals{}
@@ -139,20 +144,22 @@ func (x *Replay) Summary() Report {
 		if s.join >= 0 {
 			sr.InferredJoinID = c.requests[s.join].id
 		}
+		last := int64(0)
 		for _, i := range s.requests {
-			sr.States[x.states[i].state]++
-		}
-		first, last := x.states[s.requests[0]], x.states[s.requests[len(s.requests)-1]]
-		if first.sent {
-			sr.ArrivalUs = pointer(first.arrivalUs)
+			state := x.states[i]
+			sr.States[state.state]++
+			if state.sent && (sr.ArrivalUs == nil || state.arrivalUs < *sr.ArrivalUs) {
+				sr.ArrivalUs = pointer(state.arrivalUs)
+			}
+			last = max(last, state.terminalUs)
 		}
 		if sr.States[Completed] == len(s.requests) {
-			sr.CompletionUs = pointer(last.terminalUs)
+			sr.CompletionUs = pointer(last)
 		}
 		r.Sessions = append(r.Sessions, sr)
 	}
-	for _, f := range c.families {
-		fr := FamilyReport{TraceID: f.id, OriginMs: f.originMs, BirthUs: (f.originMs - c.originMs) * 1000, States: make(map[State]int)}
+	for fi, f := range c.families {
+		fr := FamilyReport{TraceID: f.id, OriginMs: f.originMs, BirthUs: x.birthUs[fi], States: make(map[State]int)}
 		complete, last := true, int64(0)
 		for _, si := range f.sessions {
 			for _, i := range c.sessions[si].requests {
@@ -160,14 +167,13 @@ func (x *Replay) Summary() Report {
 				fr.States[s.state]++
 				complete = complete && s.state == Completed
 				last = max(last, s.terminalUs)
+				if s.sent && (fr.ArrivalUs == nil || s.arrivalUs < *fr.ArrivalUs) {
+					fr.ArrivalUs = pointer(s.arrivalUs)
+				}
 			}
 		}
-		first := x.states[c.sessions[f.root].requests[0]]
-		if first.sent {
-			fr.ArrivalUs = pointer(first.arrivalUs)
-		}
 		if complete {
-			fr.CompletionUs, fr.MakespanUs = pointer(last), pointer(last-first.arrivalUs)
+			fr.CompletionUs, fr.MakespanUs = pointer(last), pointer(last-*fr.ArrivalUs)
 		}
 		r.Families = append(r.Families, fr)
 	}

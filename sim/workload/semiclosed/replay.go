@@ -21,7 +21,10 @@ const (
 	Censored  State = "censored"
 )
 
-type Config struct{ JoinPolicy JoinPolicy }
+type Config struct {
+	JoinPolicy JoinPolicy
+	Arrivals   ArrivalConfig
+}
 
 type requestState struct {
 	state      State
@@ -50,6 +53,8 @@ type Replay struct {
 	ttfts             map[string]float64
 	e2es              map[string]float64
 	metricCompletions map[string]float64
+	arrivals          ArrivalConfig
+	birthUs           []int64
 }
 
 func NewReplay(c *Corpus, cfg Config) (*Replay, error) {
@@ -59,10 +64,32 @@ func NewReplay(c *Corpus, cfg Config) (*Replay, error) {
 	if cfg.JoinPolicy == "" {
 		cfg.JoinPolicy = TimingInferred
 	}
-	if cfg.JoinPolicy != TimingInferred && cfg.JoinPolicy != NoJoins {
+	if c.explicitDeps != nil {
+		if cfg.JoinPolicy != TimingInferred && cfg.JoinPolicy != ExplicitDAG {
+			return nil, fmt.Errorf("explicit DAG input cannot disable its parent dependencies")
+		}
+		cfg.JoinPolicy = ExplicitDAG
+	} else if cfg.JoinPolicy != TimingInferred && cfg.JoinPolicy != NoJoins {
 		return nil, fmt.Errorf("unknown semi-closed join policy %q", cfg.JoinPolicy)
 	}
-	x := &Replay{corpus: c, policy: cfg.JoinPolicy, deps: c.dependencies(cfg.JoinPolicy), states: make([]requestState, len(c.requests)), byID: make(map[string]int, len(c.requests))}
+	if cfg.Arrivals.Mode == "" {
+		cfg.Arrivals.Mode = "trace"
+	}
+	births, err := c.arrivals(cfg.Arrivals)
+	if err != nil {
+		return nil, err
+	}
+	deps := c.explicitDeps
+	if deps == nil {
+		deps = c.dependencies(cfg.JoinPolicy)
+	}
+	for ri, offset := range c.rootOffsetsUs {
+		fi := c.sessions[c.requests[ri].session].family
+		if births[fi] > math.MaxInt64-offset {
+			return nil, fmt.Errorf("root arrival exceeds simulation clock")
+		}
+	}
+	x := &Replay{corpus: c, policy: cfg.JoinPolicy, deps: deps, arrivals: cfg.Arrivals, birthUs: births, states: make([]requestState, len(c.requests)), byID: make(map[string]int, len(c.requests))}
 	for i, r := range c.requests {
 		x.states[i].state = Pending
 		x.byID[r.id] = i
@@ -76,9 +103,12 @@ func (x *Replay) Start() []*sim.Request {
 	}
 	x.started = true
 	var out []*sim.Request
-	for _, f := range x.corpus.families {
-		ri := x.corpus.sessions[f.root].requests[0]
-		out = append(out, x.schedule(ri, (f.originMs-x.corpus.originMs)*1000))
+	for ri, d := range x.deps {
+		if len(d.prerequisites) != 0 {
+			continue
+		}
+		fi := x.corpus.sessions[x.corpus.requests[ri].session].family
+		out = append(out, x.schedule(ri, x.birthUs[fi]+x.corpus.rootOffsetsUs[ri]))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].ArrivalTime != out[j].ArrivalTime {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -21,7 +22,9 @@ import (
 func restoreSemiClosedFlags(t *testing.T) {
 	t.Helper()
 	input, report, join, session, metrics := semiClosedInput, semiClosedReport, semiClosedJoinPolicy, replaySessionMode, replayMetricsPath
+	arrivals := semiClosedArrivals
 	t.Cleanup(func() {
+		semiClosedArrivals = arrivals
 		semiClosedInput, semiClosedReport, semiClosedJoinPolicy, replaySessionMode, replayMetricsPath = input, report, join, session, metrics
 	})
 }
@@ -68,6 +71,38 @@ func TestSemiClosedZeroOutputPDRefused(t *testing.T) {
 	}
 	if err := validateSemiClosedDeployment(x, 0, 0, 0); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSemiClosedDAGInputAliasesCannotBeOverwritten(t *testing.T) {
+	for _, hardlink := range []bool{false, true} {
+		for _, flag := range []string{"semi-closed-report", "metrics-path"} {
+			t.Run(fmt.Sprintf("%s/hardlink=%v", flag, hardlink), func(t *testing.T) {
+				restoreSemiClosedFlags(t)
+				dir := t.TempDir()
+				input, alias := filepath.Join(dir, "source.jsonl"), filepath.Join(dir, "alias.json")
+				if err := os.WriteFile(input, []byte("original"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				link := os.Symlink
+				if hardlink {
+					link = os.Link
+				}
+				if err := link(input, alias); err != nil {
+					t.Fatal(err)
+				}
+				c := &cobra.Command{}
+				registerSemiClosedReplayFlags(c)
+				c.Flags().StringVar(&replayMetricsPath, "metrics-path", "", "")
+				args := []string{"--semi-closed-input", input, "--semi-closed-report", filepath.Join(dir, "report.json"), "--" + flag, alias}
+				if err := c.ParseFlags(args); err != nil {
+					t.Fatal(err)
+				}
+				if err := validateSemiClosedFlags(c); err == nil {
+					t.Fatal("input alias accepted as output")
+				}
+			})
+		}
 	}
 }
 

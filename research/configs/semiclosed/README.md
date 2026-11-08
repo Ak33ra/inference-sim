@@ -22,11 +22,34 @@ Start with one of these complete examples:
 | [glm52-smoke.json](glm52-smoke.json) | Week 9, the existing 175-request root window | GLM-5.2-FP8, two B200 TP8 replicas |
 | [glm52-all.json](glm52-all.json) | All available complete weeks, no root window | GLM-5.2-FP8, two B200 TP8 replicas |
 | [deepseek-h200-diagnostic.json](deepseek-h200-diagnostic.json) | Week 10, all eligible DeepSeek-V4-Flash families | DeepSeek-V4.1-Flash, one H200 TP4 replica, DSpark K5 |
+| [deepseek-h200-2replicas.json](deepseek-h200-2replicas.json) | Week 10, all eligible DeepSeek-V4-Flash families | DeepSeek-V4.1-Flash, two H200 TP4 replicas, DSpark K5 |
 
 The DeepSeek example reproduces a serving configuration used in the
 [diagnostic study](../../semiclosed/deepseek_h200.md). It is not a calibrated
 baseline. Native V4.1 weights with DSpark exceed the modeled capacity of one or
 two H200 GPUs.
+
+The two-replica DeepSeek config allocates two four-GPU nodes (eight H200 GPUs
+total) with an `ib-400g` fabric. It keeps the diagnostic config's engine settings
+and uses BLIS's default llm-d Endpoint Picker: queue, KV-cache utilization, and
+prefix-cache scorers with weights 2, 2, and 3, followed by a max-score picker.
+Run it with:
+
+```bash
+research/scripts/semi_closed.sh run research/configs/semiclosed/deepseek-h200-2replicas.json
+```
+
+Omitting `serving.router` uses the default router. To select a native Endpoint
+Picker profile, add this object inside `serving`:
+
+```json
+"router": {"endpoint_picker_config": "../routers/jsq.yaml"}
+```
+
+The path is relative to the JSON config. The launcher snapshots the profile as
+`router.yaml` in the run directory, records its SHA-256 in the resolved config,
+and points the generated deployment at that snapshot. See the
+[routing guide](../../../docs/guide/routing.md) for supported plugins.
 
 Preview the resolved dates, layout, scenario, and commands before a large run:
 
@@ -162,3 +185,50 @@ research/scripts/semi_closed.sh verify /tmp/my-glm-run
 
 If the config used a custom source directory, pass that directory with `--source`
 to this legacy verification command.
+
+Synthetic traces with explicit request dependencies use
+[natural-oolong.json](natural-oolong.json). It runs GPT-OSS-120B on one B200,
+with one root family arriving each second. See the [DAG run guide](../../semiclosed/dag.md)
+for Poisson arrivals, simultaneous starts, and saved-run verification.
+
+The Oolong node-count study keeps prefix caching disabled and uses one B200 TP1
+replica per node. The default router distributes requests across replicas.
+Use [one node](natural-oolong-1node.json), [two nodes](natural-oolong-2nodes.json),
+[four nodes](natural-oolong-4nodes.json), or [eight nodes](natural-oolong-8nodes.json).
+Each config writes to its own output directory and retains fixed one-second root
+arrivals with seed 42. For example:
+
+```bash
+research/scripts/semi_closed.sh run research/configs/semiclosed/natural-oolong-4nodes.json
+```
+
+[commit0-overlap.json](commit0-overlap.json) mixes the `w25-29` and `w30-34`
+Commit0 buckets, with two copies of every family. It uses four B200 TP1 replicas,
+prefix caching off, and one root arrival per second. Edit `trace.sources` to mix
+other files, and `run.arrivals` to control overlap. See
+[Overlap traces and add users](../../semiclosed/dag.md#overlap-traces-and-add-users)
+for simultaneous starts and Poisson arrivals.
+
+The same overlapped workload has a six-config routing grid:
+
+| Router | 4 replicas | 8 replicas | 16 replicas |
+| --- | --- | --- | --- |
+| JSQ | [config](commit0-overlap-jsq-4replicas.json) | [config](commit0-overlap-jsq-8replicas.json) | [config](commit0-overlap-jsq-16replicas.json) |
+| Least-token | [config](commit0-overlap-least-token-4replicas.json) | [config](commit0-overlap-least-token-8replicas.json) | [config](commit0-overlap-least-token-16replicas.json) |
+
+[JSQ](../routers/jsq.yaml) scores replicas by unfinished requests, including
+waiting and running requests. [Least-token](../routers/least-token.yaml) scores
+them by in-flight prompt tokens, with output-token estimates disabled. These
+nonstreaming traces retain that token load until response completion. Each
+profile uses only its named scorer and a max-score picker. Hardware, model,
+arrivals, prefix-cache settings, and trace copies are otherwise identical.
+Both profiles explicitly disable flow control and use a composite pool detector
+that adds no endpoint filter. This prevents llm-d's default utilization filter
+from excluding the minimum-load replica before scoring.
+
+Run one config, using a fresh output path when repeating a saved run:
+
+```bash
+research/scripts/semi_closed.sh run research/configs/semiclosed/commit0-overlap-jsq-8replicas.json \
+  --output /tmp/commit0-jsq-8
+```

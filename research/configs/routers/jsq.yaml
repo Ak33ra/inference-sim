@@ -1,0 +1,26 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates: ["flowControl=false"]
+plugins:
+- type: token-producer
+- type: inflight-load-producer
+  parameters:
+    addEstimatedOutputTokens: false
+- type: active-request-scorer
+- type: max-score-picker
+- type: single-profile-handler
+- type: utilization-detector
+  name: pool-utilization
+- type: max-saturation-detector
+  name: pool-saturation
+  parameters:
+    detectors: [pool-utilization]
+flowControl:
+  saturationDetector:
+    pluginRef: pool-saturation
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: max-score-picker

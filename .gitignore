@@ -150,3 +150,5 @@ docs/plans/
 
 # rapid property-test failure files (re-generated on every failing run)
 **/testdata/rapid/
+
+/research/configs/semiclosed/oolong-next/

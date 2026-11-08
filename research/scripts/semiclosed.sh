@@ -10,8 +10,8 @@ Usage: research/scripts/semiclosed.sh [smoke|checks|full] [OPTIONS]
 smoke   Convert, build, replay, and verify the documented 175-request selection (default).
 checks  Run smoke plus workload, cluster, CLI, and original-source AgentX parity tests.
 full    Replay all eligible selected-model families in every available weekly directory.
-verify  Check a saved run against original Parquet and print JSON without changing it.
-run     Run a JSON experiment with separate trace and serving models and numbered weeks.
+verify  Check a saved run against original Parquet or explicit-DAG Weka input.
+run     Run a JSON experiment from FreeInference weeks or explicit-DAG Weka files.
 
   --output NEW_DIR       Fresh run directory (default: research/outputs/semiclosed/<UTC>-<PID>)
   --source DIR           FreeInference release directory (default: repository traces path)
@@ -146,11 +146,18 @@ if [[ $mode != verify ]]; then
     run_dir=$output
 fi
 
-python_check='import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; import pyarrow'
+dag_input=
+if [[ $mode == verify ]]; then
+    for path in "$run_dir/input.jsonl" "$run_dir/input.jsonl.zst"; do
+        if [[ -f $path ]]; then dag_input=$path; break; fi
+    done
+fi
+python_check='import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"'
+if [[ -z $dag_input ]]; then python_check+='; import pyarrow'; fi
 if [[ -n $python_exe ]]; then
     python=("$python_exe")
     if (( ! dry_run )); then
-        "$python_exe" -B -c "$python_check" || die '--python/PYTHON must provide Python 3.11+ and PyArrow'
+        "$python_exe" -B -c "$python_check" || die '--python/PYTHON must provide Python 3.11+ and PyArrow for FreeInference'
     fi
 elif (( ! dry_run )) && python3 -B -c "$python_check" >/dev/null 2>&1; then
     python=(python3)
@@ -172,6 +179,18 @@ run() {
 }
 verify=("${python[@]}" "$repo/research/semiclosed/verify.py" --input "$run_dir/input"
     --report "$run_dir/workload.json" --metrics "$run_dir/metrics.json" --source "$source_dir")
+if [[ -n $dag_input ]]; then
+    verify=("${python[@]}" "$repo/research/semiclosed/verify_dag.py" --input "$dag_input"
+        --report "$run_dir/workload.json" --metrics "$run_dir/metrics.json")
+    composed=false
+    if [[ -f $run_dir/config.resolved.json ]]; then
+        composed=$(python3 -B -c 'import json,sys; t=json.load(open(sys.argv[1]))["trace"]; print("true" if "sources" in t or "composition" in t else "false")' "$run_dir/config.resolved.json")
+    fi
+    if [[ $composed == true || -f $run_dir/composition.json ]]; then
+        verify=("${python[@]}" -m research.semiclosed.mix verify --input "$dag_input"
+            --manifest "$run_dir/composition.json" --report "$run_dir/workload.json" --metrics "$run_dir/metrics.json")
+    fi
+fi
 if [[ $mode == verify ]]; then run "${verify[@]}"; exit 0; fi
 
 if (( ! dry_run )); then

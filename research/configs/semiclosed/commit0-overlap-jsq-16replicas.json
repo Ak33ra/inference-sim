@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "trace": {
+    "format": "weka-dag",
+    "sources": [
+      {
+        "path": "../../../traces/commit0-fanout-buckets/w25-29/traces.jsonl.zst",
+        "copies": 2
+      },
+      {
+        "path": "../../../traces/commit0-fanout-buckets/w30-34/traces.jsonl.zst",
+        "copies": 2
+      }
+    ]
+  },
+  "serving": {
+    "model": "gpt-oss-120b",
+    "cluster": {
+      "hardware": "b200",
+      "gpus_per_node": 1,
+      "tp": 1,
+      "replicas": 16,
+      "fabric": "ib-400g"
+    },
+    "engine": {
+      "quantization": "mxfp4",
+      "cache_dtype": "auto",
+      "block_size": 16,
+      "max_num_batched_tokens": 16384,
+      "max_num_seqs": 1024,
+      "max_model_len": 131072,
+      "cudagraph_mode": "FULL_AND_PIECEWISE",
+      "gpu_memory_utilization": 0.85,
+      "enable_prefix_caching": false
+    },
+    "router": {
+      "endpoint_picker_config": "../routers/jsq.yaml"
+    }
+  },
+  "run": {
+    "seed": 42,
+    "arrivals": {
+      "mode": "fixed",
+      "interval_s": 1
+    },
+    "series_interval_s": 1
+  },
+  "output": "../../outputs/semiclosed/commit0-overlap-jsq-16replicas-pure"
+}

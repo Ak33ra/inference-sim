@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import json
 import math
@@ -14,6 +15,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+if __package__:
+    from .mix import parse_sources
+else:
+    from mix import parse_sources
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 COEFFICIENTS = [f"cost-model-{name}" for name in (
@@ -184,16 +190,38 @@ def parse_engine(value: object, acceptance: object) -> tuple[dict, dict | None]:
     return engine, acceptance
 
 
-def python_command(explicit: str | None) -> tuple[str, ...]:
+def python_command(explicit: str | None, *, needs_arrow: bool = True) -> tuple[str, ...]:
     if explicit:
         executable = shutil.which(explicit)
         if executable is None:
             raise ValueError(f"Python executable not found: {explicit}")
         return (executable, "-B")
-    if importlib.util.find_spec("pyarrow") is None and (uv := shutil.which("uv")):
+    if needs_arrow and importlib.util.find_spec("pyarrow") is None and (uv := shutil.which("uv")):
         return (uv, "run", "--no-project", "--python", ">=3.11", "--with-requirements",
                 str(REPOSITORY / "research/freeinference_trace/requirements.txt"), "python", "-B")
     return (sys.executable, "-B")
+
+
+def parse_arrivals(value: object, seed: int) -> dict:
+    value = object_fields(value, {"mode", "interval_s", "rate_per_s", "seed"},
+                          {"mode"}, "run.arrivals")
+    mode = typed(value["mode"], str, "run.arrivals.mode")
+    if mode not in ("trace", "fixed", "poisson"):
+        raise ValueError("run.arrivals.mode must be trace, fixed, or poisson")
+    allowed = {"mode", "seed"} | ({"interval_s"} if mode == "fixed" else
+                                  {"rate_per_s"} if mode == "poisson" else set())
+    object_fields(value, allowed, {"rate_per_s"} if mode == "poisson" else set(),
+                  "run.arrivals")
+    result = {"mode": mode, "seed": typed(value.get("seed", seed), int, "run.arrivals.seed")}
+    if not -(2**63) <= result["seed"] < 2**63:
+        raise ValueError("run.arrivals.seed must fit a signed 64-bit integer")
+    if mode in ("fixed", "poisson"):
+        field = "interval_s" if mode == "fixed" else "rate_per_s"
+        number = typed(value.get(field, 0), float, f"run.arrivals.{field}")
+        if number < 0 or (mode == "poisson" and number == 0):
+            raise ValueError(f"run.arrivals.{field} must be {'positive' if mode == 'poisson' else 'nonnegative'}")
+        result[field] = number
+    return result
 
 
 def json_text(value: object) -> str:
@@ -207,6 +235,7 @@ class RunPlan:
     original: bytes
     scenario: str
     commands: tuple[tuple[str, ...], ...]
+    router_config: str | None = None
 
 
 def prepare(config: Path, *, output: Path | None = None, python: str | None = None,
@@ -220,18 +249,34 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
                          "registry", "defaults", "python"}, {"version", "trace", "serving"}, "config")
     if typed(raw["version"], int, "version") != 1:
         raise ValueError("version must be 1")
-    trace = object_fields(raw["trace"], {"source", "model", "weeks", "start_ms", "end_ms"},
-                          {"model", "weeks"}, "trace")
-    source = path_from(trace.get("source", str(REPOSITORY / "traces/freeinference_agentic_trace/release")),
-                       config.parent, "trace.source")
-    model = typed(trace["model"], str, "trace.model")
-    selected, unavailable = resolve_weeks(trace["weeks"], source)
-    for name in ("start_ms", "end_ms"):
-        if name in trace:
-            typed(trace[name], int, f"trace.{name}")
-    if "start_ms" in trace and "end_ms" in trace and trace["start_ms"] >= trace["end_ms"]:
-        raise ValueError("trace.start_ms must precede trace.end_ms")
-    serving = object_fields(raw["serving"], {"model", "cluster", "engine", "acceptance",
+    trace = object_fields(raw["trace"], {"format", "path", "sources", "source", "model", "weeks", "start_ms", "end_ms"}, set(), "trace")
+    trace_format = typed(trace.get("format", "freeinference"), str, "trace.format")
+    selected, unavailable = [], []
+    sources = ()
+    if trace_format == "weka-dag":
+        object_fields(trace, {"format", "path", "sources"}, set(), "trace")
+        if ("path" in trace) == ("sources" in trace):
+            raise ValueError("weka-dag trace requires exactly one of path or sources")
+        if "sources" in trace:
+            sources = parse_sources(trace["sources"], config.parent)
+        else:
+            source = path_from(trace["path"], config.parent, "trace.path")
+            if not source.is_file():
+                raise ValueError(f"trace.path is not a file: {source}")
+    elif trace_format == "freeinference":
+        object_fields(trace, {"format", "source", "model", "weeks", "start_ms", "end_ms"}, {"model", "weeks"}, "trace")
+        source = path_from(trace.get("source", str(REPOSITORY / "traces/freeinference_agentic_trace/release")),
+                           config.parent, "trace.source")
+        model = typed(trace["model"], str, "trace.model")
+        selected, unavailable = resolve_weeks(trace["weeks"], source)
+        for name in ("start_ms", "end_ms"):
+            if name in trace:
+                typed(trace[name], int, f"trace.{name}")
+        if "start_ms" in trace and "end_ms" in trace and trace["start_ms"] >= trace["end_ms"]:
+            raise ValueError("trace.start_ms must precede trace.end_ms")
+    else:
+        raise ValueError("trace.format must be freeinference or weka-dag")
+    serving = object_fields(raw["serving"], {"model", "cluster", "engine", "acceptance", "router",
                                              "engine_version", "coefficients"},
                             {"model", "cluster", "engine"}, "serving")
     serving_model = typed(serving["model"], str, "serving.model")
@@ -245,13 +290,27 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         raise ValueError("serving.coefficients must be distinct")
     layout = Layout.parse(serving["cluster"])
     engine, acceptance = parse_engine(serving["engine"], serving.get("acceptance"))
-    run = object_fields(raw.get("run", {}), {"seed", "join_policy", "series_interval_s"}, set(), "run")
+    router_config, router_source = None, None
+    if "router" in serving:
+        router = object_fields(serving["router"], {"endpoint_picker_config"},
+                               {"endpoint_picker_config"}, "serving.router")
+        router_source = path_from(router["endpoint_picker_config"], config.parent,
+                                  "serving.router.endpoint_picker_config")
+        if not router_source.is_file():
+            raise ValueError(f"serving.router.endpoint_picker_config is not a file: {router_source}")
+        router_config = router_source.read_text()
+        if not router_config.strip():
+            raise ValueError("serving.router.endpoint_picker_config must not be empty")
+    run = object_fields(raw.get("run", {}), {"seed", "join_policy", "series_interval_s", "arrivals"}, set(), "run")
     seed = typed(run.get("seed", 42), int, "run.seed")
     if not -(2**63) <= seed < 2**63:
         raise ValueError("run.seed must fit a signed 64-bit integer")
-    join = typed(run.get("join_policy", "timing-inferred"), str, "run.join_policy")
-    if join not in ("timing-inferred", "none"):
-        raise ValueError("run.join_policy must be timing-inferred or none")
+    join = typed(run.get("join_policy", "explicit" if trace_format == "weka-dag" else "timing-inferred"), str, "run.join_policy")
+    if join not in (("explicit",) if trace_format == "weka-dag" else ("timing-inferred", "none")):
+        raise ValueError("run.join_policy must be explicit for weka-dag, or timing-inferred/none for freeinference")
+    arrivals = parse_arrivals(run.get("arrivals", {"mode": "trace"}), seed)
+    if trace_format == "freeinference" and arrivals["mode"] != "trace":
+        raise ValueError("config-generated arrivals currently require trace.format=weka-dag; FreeInference keeps recorded arrivals")
     series = typed(run.get("series_interval_s", 0), float, "run.series_interval_s")
     if series < 0:
         raise ValueError("run.series_interval_s must be nonnegative")
@@ -282,7 +341,7 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         if "/" in interpreter:
             base = config.parent if python is None and "python" in raw else caller
             interpreter = str(path_from(interpreter, base, "python"))
-    python_argv = python_command(interpreter)
+    python_argv = python_command(interpreter, needs_arrow=trace_format == "freeinference")
     cluster = {"hardware": layout.hardware, "nodes": layout.nodes,
                "gpus_per_node": layout.gpus_per_node}
     if layout.fabric:
@@ -293,27 +352,53 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         "role": "colocated", "nodes": layout.nodes,
         "parallel": {"tp": layout.tp, "pp": 1, "dp": 1,
                      "enable_expert_parallel": layout.enable_expert_parallel}, "engine": engine}]}
+    if router_config is not None:
+        deployment["router"] = {"endpoint_picker_config": "router.yaml"}
     scenario_text = json_text(scenario) + "---\n" + json_text(deployment)
-    conversion = [*python_argv, "-m", "research.freeinference_trace", "--source", str(source)]
-    for ordinal in selected:
-        conversion += ["--week", WEEKS[ordinal - 1]]
-    conversion += ["--model", model, "--output", str(output / "input")]
-    for name in ("start_ms", "end_ms"):
-        if name in trace:
-            conversion += ["--" + name.replace("_", "-"), str(trace[name])]
-    replay = [str(output / "blis"), "replay", "--semi-closed-input", str(output / "input"),
+    input_path = output / "input"
+    if sources:
+        input_path = output / "input.jsonl"
+        conversion = [*python_argv, "-m", "research.semiclosed.mix", "build",
+                      "--config", str(output / "config.resolved.json")]
+        resolved_trace = {"format": trace_format, "sources": [source.resolved() for source in sources],
+                          "input": str(input_path), "composition": str(output / "composition.json")}
+    elif trace_format == "weka-dag":
+        input_path = output / ("input.jsonl.zst" if source.suffix == ".zst" else "input.jsonl")
+        conversion = [*python_argv, "-c", "import shutil,sys; shutil.copyfile(sys.argv[1],sys.argv[2])", str(source), str(input_path)]
+        resolved_trace = {"format": trace_format, "path": str(source), "input": str(input_path)}
+    else:
+        conversion = [*python_argv, "-m", "research.freeinference_trace", "--source", str(source)]
+        for ordinal in selected:
+            conversion += ["--week", WEEKS[ordinal - 1]]
+        conversion += ["--model", model, "--output", str(input_path)]
+        for name in ("start_ms", "end_ms"):
+            if name in trace:
+                conversion += ["--" + name.replace("_", "-"), str(trace[name])]
+        resolved_trace = {**trace, "source": str(source), "weeks": selected}
+    replay = [str(output / "blis"), "replay", "--semi-closed-input", str(input_path),
               "--semi-closed-report", str(output / "workload.json"), "--metrics-path", str(output / "metrics.json"),
               "--semi-closed-join-policy", join, "--scenario", "scenario.yaml", "--scenarios", str(output),
               "--num-instances", str(layout.replicas), "--seed", str(seed),
               "--server-series-interval-s", str(series), "--defaults-filepath", str(paths["defaults"]),
               "--catalog", str(paths["catalog"]), "--registry", str(paths["registry"])]
+    if "arrivals" in run:
+        replay += ["--semi-closed-arrivals", arrivals["mode"], "--semi-closed-arrival-seed", str(arrivals["seed"])]
+        for field, flag in (("interval_s", "--semi-closed-arrival-interval-s"), ("rate_per_s", "--semi-closed-arrival-rate")):
+            if field in arrivals:
+                replay += [flag, str(arrivals[field])]
     if acceptance:
         replay += ["--speculative-category", acceptance["category"], "--speculative-thinking", acceptance["thinking"]]
-    verify = [*python_argv, str(REPOSITORY / "research/semiclosed/verify.py"), "--input", str(output / "input"),
-              "--report", str(output / "workload.json"), "--metrics", str(output / "metrics.json"),
-              "--source", str(source)]
+    verifier = "verify_dag.py" if trace_format == "weka-dag" else "verify.py"
+    verify = [*python_argv, str(REPOSITORY / "research/semiclosed" / verifier), "--input", str(input_path),
+              "--report", str(output / "workload.json"), "--metrics", str(output / "metrics.json")]
+    if trace_format == "freeinference":
+        verify += ["--source", str(source)]
+    if sources:
+        verify = [*python_argv, "-m", "research.semiclosed.mix", "verify",
+                  "--input", str(input_path), "--manifest", resolved_trace["composition"],
+                  "--report", str(output / "workload.json"), "--metrics", str(output / "metrics.json")]
     resolved = {"version": 1, "config_path": str(config), "output": str(output),
-                "trace": {**trace, "source": str(source), "weeks": selected},
+                "trace": resolved_trace,
                 "week_mapping": {str(i): name for i, name in enumerate(WEEKS, 1)},
                 "unavailable_weeks": unavailable,
                 "serving": {"model": serving_model, "engine_version": version, "coefficients": coefficients,
@@ -323,17 +408,25 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
                 "capacity": {"allocated_gpus": layout.nodes * layout.gpus_per_node,
                              "active_gpus": layout.replicas * layout.tp,
                              "spare_gpus": layout.nodes * layout.gpus_per_node - layout.replicas * layout.tp},
-                "run": {"seed": seed, "join_policy": join, "series_interval_s": series},
+                "run": {"seed": seed, "join_policy": join, "series_interval_s": series, "arrivals": arrivals},
                 "python_argv": python_argv, **{key: str(value) for key, value in paths.items()}}
+    if router_config is not None:
+        resolved["serving"]["router"] = {
+            "endpoint_picker_config": str(router_source), "saved_config": str(output / "router.yaml"),
+            "sha256": hashlib.sha256(router_config.encode()).hexdigest()}
     commands = (tuple(conversion), ("go", "build", "-o", str(output / "blis"), "."),
                 tuple(replay), tuple(verify))
-    return RunPlan(output, resolved, original, scenario_text, commands)
+    return RunPlan(output, resolved, original, scenario_text, commands, router_config)
 
 
 def describe(plan: RunPlan) -> None:
-    print(f"Trace model: {plan.resolved['trace']['model']}")
+    print(f"Trace model: {plan.resolved['trace'].get('model', 'from explicit DAG input')}")
     print(f"Serving model: {plan.resolved['serving']['model']}")
-    for ordinal in plan.resolved["trace"]["weeks"]:
+    if "router" in plan.resolved["serving"]:
+        print(f"Router config: {plan.resolved['serving']['router']['endpoint_picker_config']}")
+    for source in plan.resolved["trace"].get("sources", []):
+        print(f"DAG source: {source['path']} ({source['copies']} copies)")
+    for ordinal in plan.resolved["trace"].get("weeks", []):
         print(f"Week {ordinal}: {WEEKS[ordinal - 1]}")
     if plan.resolved["unavailable_weeks"]:
         print("Unavailable weeks skipped by all: " + ", ".join(map(str, plan.resolved["unavailable_weeks"])))
@@ -346,6 +439,8 @@ def execute(plan: RunPlan) -> int:
     (plan.output / "config.original.json").write_bytes(plan.original)
     (plan.output / "config.resolved.json").write_text(json_text(plan.resolved))
     (plan.output / "scenario.yaml").write_text(plan.scenario)
+    if plan.router_config is not None:
+        (plan.output / "router.yaml").write_text(plan.router_config)
     (plan.output / "commands.json").write_text(json_text(plan.commands))
     (plan.output / "commands.log").write_text("".join(shlex.join(argv) + "\n" for argv in plan.commands))
     with (plan.output / "run.log").open("w") as log:
@@ -396,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print("Resolved configuration:\n" + json_text(plan.resolved), end="")
             print("Generated scenario:\n" + plan.scenario, end="")
+            if plan.router_config is not None:
+                print("Router configuration:\n" + plan.router_config, end="")
             print(f"Command working directory: {REPOSITORY}")
             for command in plan.commands:
                 print(shlex.join(command))

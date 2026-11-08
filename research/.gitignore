@@ -1,1 +1,8 @@
 /outputs/
+!/configs/semiclosed/natural-oolong.json
+!/configs/semiclosed/natural-oolong-*node*.json
+!/configs/semiclosed/commit0-overlap.json
+!/configs/semiclosed/commit0-overlap-*.json
+!/configs/routers/*.yaml
+!/analysis/requirements.txt
+!/notebooks/semiclosed_analysis.ipynb

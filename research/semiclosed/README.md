@@ -4,6 +4,15 @@ This replay admits every selected root family at its recorded start time. Later 
 
 The input is the existing [FreeInference conversion](../freeinference_trace/README.md), containing `manifest.json`, `corpus.jsonl`, and `audit.jsonl`. The loader checks artifact sizes and SHA256 digests, then cross-checks family and session identities, steps, recorded times, token counts, prefix coverage, child placement, join candidates, and totals. Child order must agree with the audit's source tool-call order. Weka does not retain the original numerical tool-call index, so source verification checks that field against Parquet.
 
+For `natural-oolong-fanout.jsonl.zst` and other Weka files with `req_id` and
+`parent_ids`, see [Run an explicit-DAG Weka trace](dag.md) and the
+[format and arrival reference](dag-format.md).
+
+For plots and policy comparisons from saved runs, use the
+[standard analysis script and notebook](../analysis/README.md). The
+[field reference](../analysis/fields.md) explains which measurements are available
+and the limits of queue/prefill attribution.
+
 ## Run from a config
 
 Use one JSON file to select the source model, simulated model, cluster layout,
