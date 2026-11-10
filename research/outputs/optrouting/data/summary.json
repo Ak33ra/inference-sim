@@ -1,0 +1,72 @@
+{
+ "families": 164,
+ "forks": 546,
+ "seeds": [
+  42,
+  43,
+  44,
+  45,
+  46
+ ],
+ "gpus": 8,
+ "forks_at_lower_bound": 545,
+ "max_optimal_spread_s": 0.0,
+ "by_bucket": {
+  "w00-04": {
+   "families": 105,
+   "median_jsq_excess_pct": 0.0,
+   "max_jsq_excess_pct": 0.0,
+   "median_least_token_excess_pct": 0.0,
+   "max_least_token_excess_pct": 0.0
+  },
+  "w05-09": {
+   "families": 26,
+   "median_jsq_excess_pct": -0.0,
+   "max_jsq_excess_pct": 0.087,
+   "median_least_token_excess_pct": -0.0,
+   "max_least_token_excess_pct": 0.21
+  },
+  "w10-14": {
+   "families": 16,
+   "median_jsq_excess_pct": 0.161,
+   "max_jsq_excess_pct": 2.759,
+   "median_least_token_excess_pct": 0.145,
+   "max_least_token_excess_pct": 3.096
+  },
+  "w15-19": {
+   "families": 6,
+   "median_jsq_excess_pct": 0.856,
+   "max_jsq_excess_pct": 2.214,
+   "median_least_token_excess_pct": 0.987,
+   "max_least_token_excess_pct": 3.878
+  },
+  "w20-24": {
+   "families": 4,
+   "median_jsq_excess_pct": 2.482,
+   "max_jsq_excess_pct": 7.704,
+   "median_least_token_excess_pct": 2.899,
+   "max_least_token_excess_pct": 7.951
+  },
+  "w25-29": {
+   "families": 3,
+   "median_jsq_excess_pct": 0.451,
+   "max_jsq_excess_pct": 0.904,
+   "median_least_token_excess_pct": 0.541,
+   "max_least_token_excess_pct": 1.181
+  },
+  "w30-34": {
+   "families": 3,
+   "median_jsq_excess_pct": 1.033,
+   "max_jsq_excess_pct": 2.638,
+   "median_least_token_excess_pct": 1.92,
+   "max_least_token_excess_pct": 2.915
+  },
+  "w65-69": {
+   "families": 1,
+   "median_jsq_excess_pct": 4.858,
+   "max_jsq_excess_pct": 4.858,
+   "median_least_token_excess_pct": 4.604,
+   "max_least_token_excess_pct": 4.604
+  }
+ }
+}
