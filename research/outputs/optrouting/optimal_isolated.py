@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Optimal isolated root-session end-to-end latency for every commit0 family on 8 B200 replicas.
+"""Optimal isolated root-session end-to-end latency for every commit0 or Oolong family on 8 B200 replicas.
 
-For each commit0 family (root session plus its child sessions) run alone on 8 replicas:
+For each family (root session plus its child sessions) run alone on 8 replicas:
   * observed root end-to-end latency under JSQ and least-token (one BLIS run per router and seed,
     all families in one run, spaced far enough apart that they never overlap), and
   * the optimal latency under any work-conserving routing, found by pinning child sessions to GPUs.
@@ -18,7 +18,8 @@ requests run one at a time and routing cannot change them, so
 The script checks that this gives the same value from every observed run.
 
 Usage (BLIS_CATALOG and BLIS_REGISTRY must be set; replicate.sh does that):
-    optimal_isolated.py [--work DIR] [--out DIR] [--seeds 42 43 ...] [--jobs N] [--verify N]
+    optimal_isolated.py [--dataset commit0|oolong] [--work DIR] [--out DIR] [--seeds 42 43 ...]
+                        [--jobs N] [--verify N]
 Work is checkpointed in WORK/cache.json and WORK/vacuum/; rerunning resumes.
 """
 import argparse, collections, concurrent.futures as cf, csv, hashlib, json, math, os, pathlib, random
@@ -27,8 +28,22 @@ import re, shutil, statistics, subprocess, sys, threading
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 TRACES = REPO / "traces/commit0-fanout-buckets"
-BUCKETS = ["w00-04", "w05-09", "w10-14", "w15-19", "w20-24", "w25-29", "w30-34", "w65-69"]
-TEMPLATE = REPO / "research/configs/semiclosed/commit0-overlap-jsq-8replicas.json"
+# Per dataset: (bucket, trace file) sources in report order, which family ids to keep, the tracked
+# config the serving setup is copied from, and the default work/output directories.
+DATASETS = {
+    "commit0": {
+        "sources": [(b, TRACES / b / "traces.jsonl.zst") for b in
+                    ["w00-04", "w05-09", "w10-14", "w15-19", "w20-24", "w25-29", "w30-34", "w65-69"]],
+        "keep": lambda fid: fid.startswith("commit0"),
+        "template": REPO / "research/configs/semiclosed/commit0-overlap-jsq-8replicas.json",
+        "work": HERE / "work", "out": HERE / "data"},
+    "oolong": {
+        "sources": [("oolong", REPO / "natural-oolong-fanout.jsonl.zst")],
+        "keep": lambda fid: True,
+        "template": REPO / "research/configs/semiclosed/natural-oolong-8nodes.json",
+        "work": HERE / "work" / "oolong", "out": HERE / "data" / "oolong"},
+}
+DS = DATASETS["commit0"]  # set from --dataset in main()
 ROUTERS = {"jsq": REPO / "research/configs/routers/jsq.yaml",
            "least-token": REPO / "research/configs/routers/least-token.yaml"}
 RUNNER = REPO / "research/scripts/semi_closed.sh"
@@ -36,6 +51,7 @@ GPUS = 8
 FAMILY_SPACING_S = 12000  # longest isolated family is ~3400 s
 SUBSET_SPACING_S = 4000
 MAX_BATCH = 300
+EXHAUSTIVE_MAX = 200_000  # enumerate every pinning (into all GPUs) when there are at most this many: <= 12 children
 
 
 def log(*a):
@@ -45,22 +61,22 @@ def log(*a):
 # ---------------------------------------------------------------- families and fork structure
 
 def build_families(work, only=None):
-    """Write the commit0 families (ids matching `only`, if given) to WORK/families.jsonl; return {id: bucket}."""
+    """Write the dataset's families (ids matching `only`, if given) to WORK/families.jsonl; return {id: bucket}."""
     path, index = work / "families.jsonl", work / "buckets.json"
     if path.exists() and index.exists():
         bucket = json.loads(index.read_text())
         assert all(re.search(only, f) for f in bucket) if only else True, "--only differs from WORK's families; use a fresh --work"
         return bucket
     lines, bucket = [], {}
-    for b in BUCKETS:
-        text = subprocess.run(["zstd", "-dc", str(TRACES / b / "traces.jsonl.zst")],
-                              capture_output=True, text=True, check=True).stdout
+    for b, src in DS["sources"]:
+        text = subprocess.run(["zstd", "-dc", str(src)], capture_output=True, text=True, check=True).stdout
         for line in text.splitlines():
             fid = json.loads(line)["id"]
-            if fid.startswith("commit0") and (not only or re.search(only, fid)):
+            if DS["keep"](fid) and (not only or re.search(only, fid)):
+                assert fid not in bucket, ("duplicate family id", fid)
                 lines.append(line); bucket[fid] = b
     path.write_text("\n".join(lines) + "\n"); index.write_text(json.dumps(bucket, indent=1))
-    log(f"{len(lines)} commit0 families")
+    log(f"{len(lines)} families")
     return bucket
 
 
@@ -95,8 +111,9 @@ def forks_of(fam):
 # ---------------------------------------------------------------- running BLIS
 
 def template():
-    c = json.loads(TEMPLATE.read_text())
+    c = json.loads(DS["template"].read_text())
     c["run"]["series_interval_s"] = 0
+    c["serving"].setdefault("router", {})
     return c
 
 
@@ -257,12 +274,42 @@ def search(score, forks):
             if max(score([(f, tuple(a)), (f, tuple(b))])) >= vals[w] - 1e-6: break
             bins[f][w], bins[f][j] = a, b
             best[f] = max(score([(f, tuple(b)) for b in bins[f]]))
-    return bound, best, bins
+    proof = {f: "lower_bound" if best[f] <= bound[f] + 1e-6 else "none" for f in keys}
+    for f in keys:  # small forks above the bound: try every pinning that uses all GPUs
+        kids = forks[f]["kids"]
+        if proof[f] != "none" or stirling2(len(kids), GPUS) > EXHAUSTIVE_MAX: continue
+        parts = list(partitions(kids, GPUS))
+        score([(f, tuple(b)) for pt in parts for b in pt if len(b) > 1])
+        top = min(parts, key=lambda pt: max(score([(f, tuple(b)) for b in pt])))
+        val = max(score([(f, tuple(b)) for b in top]))
+        if val < best[f] - 1e-6: best[f], bins[f] = val, [list(b) for b in top]
+        proof[f] = "exhaustive_pinned"
+        log(f"exhaustive: {f[0]} spawn {f[1]}: {len(parts)} pinnings, best {best[f]:.3f} s (bound {bound[f]:.3f})")
+    return bound, best, bins, proof
+
+
+def stirling2(n, k):
+    """Number of ways to split n children into exactly k non-empty GPU groups."""
+    return sum((-1) ** i * math.comb(k, i) * (k - i) ** n for i in range(k + 1)) // math.factorial(k)
+
+
+def partitions(items, k):
+    """Every split of items into exactly k non-empty groups. Using every GPU is enough: under the
+    assumption the lower bound rests on, splitting a group never makes it finish later."""
+    def rec(i, groups):
+        if len(groups) + len(items) - i < k: return
+        if i == len(items):
+            yield [tuple(g) for g in groups]; return
+        for g in groups:
+            g.append(items[i]); yield from rec(i + 1, groups); g.pop()
+        if len(groups) < k:
+            groups.append([items[i]]); yield from rec(i + 1, groups); groups.pop()
+    yield from rec(0, [])
 
 
 # ---------------------------------------------------------------- report
 
-def report(out, bucket, forks, bound, best, bins, runs):
+def report(out, bucket, forks, bound, best, bins, proof, runs):
     out.mkdir(parents=True, exist_ok=True)
     obs = {k: observed(p) for k, p in runs.items()}
     seeds = sorted({s for _, s in runs})
@@ -271,7 +318,7 @@ def report(out, bucket, forks, bound, best, bins, runs):
     for f in sorted(forks):
         o = {r: [obs[(r, s)][0][f] for s in seeds] for r in ROUTERS}
         fork_rows.append({"family": f[0], "spawn_request": f[1], "children": len(forks[f]["kids"]),
-                          "lower_bound_s": round(bound[f], 3), "optimal_s": round(best[f], 3),
+                          "lower_bound_s": round(bound[f], 3), "optimal_s": round(best[f], 3), "proof": proof[f],
                           "jsq_median_s": round(med(o["jsq"]), 3), "jsq_min_s": round(min(o["jsq"]), 3),
                           "jsq_max_s": round(max(o["jsq"]), 3),
                           "least_token_median_s": round(med(o["least-token"]), 3),
@@ -280,14 +327,18 @@ def report(out, bucket, forks, bound, best, bins, runs):
                           "gpus_used": sum(1 for b in bins[f] if b)})
         partitions[f[0]][str(f[1])] = [sorted(b) for b in bins[f] if b]
     fam_rows = []
-    for fid in sorted(bucket, key=lambda x: (BUCKETS.index(bucket[x]), x)):
+    order = [b for b, _ in DS["sources"]]
+    for fid in sorted(bucket, key=lambda x: (order.index(bucket[x]), x)):
         fk = [f for f in forks if f[0] == fid]
         lat = {r: [obs[(r, s)][1][fid] for s in seeds] for r in ROUTERS}
         opt = [obs[k][1][fid] - sum(obs[k][0][f] - best[f] for f in fk) for k in runs]
+        lb = [obs[k][1][fid] - sum(obs[k][0][f] - bound[f] for f in fk) for k in runs]
         o = med(opt)
+        unproven = [f for f in fk if proof[f] != "lower_bound"]
         fam_rows.append({"family": fid, "bucket": bucket[fid], "child_sessions": sum(len(forks[f]["kids"]) for f in fk),
                          "forks": len(fk), "widest_fork": max((len(forks[f]["kids"]) for f in fk), default=0),
-                         "optimal_s": round(o, 3), "optimal_spread_s": round(max(opt) - min(opt), 3),
+                         "optimal_s": round(o, 3), "optimal_lower_bound_s": round(med(lb), 3),
+                         "forks_not_at_bound": len(unproven), "optimal_spread_s": round(max(opt) - min(opt), 3),
                          "jsq_median_s": round(med(lat["jsq"]), 3), "jsq_min_s": round(min(lat["jsq"]), 3),
                          "jsq_max_s": round(max(lat["jsq"]), 3),
                          "least_token_median_s": round(med(lat["least-token"]), 3),
@@ -300,7 +351,7 @@ def report(out, bucket, forks, bound, best, bins, runs):
             w = csv.DictWriter(fh, rows[0].keys()); w.writeheader(); w.writerows(rows)
     (out / "partitions.json").write_text(json.dumps(partitions, indent=1))
     by_bucket = {}
-    for b in BUCKETS:
+    for b in order:
         rs = [r for r in fam_rows if r["bucket"] == b]
         if not rs: continue
         by_bucket[b] = {"families": len(rs),
@@ -309,7 +360,9 @@ def report(out, bucket, forks, bound, best, bins, runs):
                         "median_least_token_excess_pct": round(med(r["least_token_excess_pct"] for r in rs), 3),
                         "max_least_token_excess_pct": round(max(r["least_token_excess_pct"] for r in rs), 3)}
     summary = {"families": len(fam_rows), "forks": len(fork_rows), "seeds": seeds, "gpus": GPUS,
-               "forks_at_lower_bound": sum(r["optimal_s"] <= r["lower_bound_s"] + 1e-3 for r in fork_rows),
+               "forks_by_proof": dict(collections.Counter(r["proof"] for r in fork_rows)),
+               "families_optimal_equals_lower_bound": sum(r["forks_not_at_bound"] == 0 for r in fam_rows),
+               "max_optimal_minus_lower_bound_s": max(round(r["optimal_s"] - r["optimal_lower_bound_s"], 3) for r in fam_rows),
                "max_optimal_spread_s": max(r["optimal_spread_s"] for r in fam_rows),
                "by_bucket": by_bucket}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
@@ -331,8 +384,9 @@ def verify(score, n):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--work", type=pathlib.Path, default=HERE / "work")
-    ap.add_argument("--out", type=pathlib.Path, default=HERE / "data")
+    ap.add_argument("--dataset", choices=sorted(DATASETS), default="commit0")
+    ap.add_argument("--work", type=pathlib.Path, help="default: work/ (commit0), work/oolong/ (oolong)")
+    ap.add_argument("--out", type=pathlib.Path, help="default: data/ (commit0), data/oolong/ (oolong)")
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
     mem_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
     ap.add_argument("--jobs", type=int, default=max(1, min((os.cpu_count() or 2) // 3, int(mem_gb // 4))),
@@ -341,6 +395,9 @@ def main():
     ap.add_argument("--only", metavar="REGEX", help="only families whose id matches (needs a fresh --work)")
     ap.add_argument("--verify", type=int, default=0, metavar="N", help="also re-simulate N cached subsets")
     a = ap.parse_args()
+    global DS
+    DS = DATASETS[a.dataset]
+    a.work = a.work or DS["work"]; a.out = a.out or DS["out"]
     for v in ("BLIS_CATALOG", "BLIS_REGISTRY"):
         if not os.environ.get(v): sys.exit(f"{v} is not set (see README.md)")
     a.work.mkdir(parents=True, exist_ok=True)
@@ -354,9 +411,9 @@ def main():
     log(f"{len(forks)} forks across {len(families)} families")
     runs = vacuum_runs(a.work, a.seeds, a.vacuum_jobs)
     score = Scorer(a.work, families, forks, a.jobs)
-    bound, best, bins = search(score, forks)
+    bound, best, bins, proof = search(score, forks)
     if a.verify: verify(score, a.verify)
-    report(a.out, bucket, forks, bound, best, bins, runs)
+    report(a.out, bucket, forks, bound, best, bins, proof, runs)
 
 
 if __name__ == "__main__":

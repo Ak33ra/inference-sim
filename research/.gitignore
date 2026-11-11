@@ -1,4 +1,8 @@
-/outputs/
+/outputs/*
+!/outputs/optrouting/
+/outputs/optrouting/work/
+!/outputs/optrouting/data/
+!/outputs/optrouting/data/**/*.json
 !/configs/semiclosed/natural-oolong.json
 !/configs/semiclosed/natural-oolong-*node*.json
 !/configs/semiclosed/commit0-overlap.json

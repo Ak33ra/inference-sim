@@ -1,0 +1,29 @@
+{
+ "families": 25,
+ "forks": 67,
+ "seeds": [
+  42,
+  43,
+  44,
+  45,
+  46
+ ],
+ "gpus": 8,
+ "forks_by_proof": {
+  "lower_bound": 61,
+  "none": 3,
+  "exhaustive_pinned": 3
+ },
+ "families_optimal_equals_lower_bound": 20,
+ "max_optimal_minus_lower_bound_s": 1.034,
+ "max_optimal_spread_s": 0.0,
+ "by_bucket": {
+  "oolong": {
+   "families": 25,
+   "median_jsq_excess_pct": 1.476,
+   "max_jsq_excess_pct": 9.191,
+   "median_least_token_excess_pct": 1.542,
+   "max_least_token_excess_pct": 5.616
+  }
+ }
+}
