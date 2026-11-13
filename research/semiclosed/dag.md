@@ -119,3 +119,10 @@ research/scripts/semi_closed.sh verify research/outputs/semiclosed/commit0-overl
 Full verification reads the original source files and checks their saved hashes.
 Keep those files at their recorded paths. The prepared `input.jsonl` remains a
 standalone input for native semi-closed replay.
+
+The [mega-trace baseline](../writeups/mega-8b200-baseline/README.md) uses one copy
+of all eight Commit0 buckets and Oolong. Its preparation command shuffles whole
+families with a recorded seed, avoiding a long tail containing only the largest
+source file. It writes a compressed standalone trace and a provenance manifest;
+requests, dependency edges, tokens, and recorded delays remain intact. Replay it
+with [mega-8b200-medium.json](../configs/semiclosed/mega-8b200-medium.json).

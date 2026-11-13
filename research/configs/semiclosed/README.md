@@ -1,5 +1,14 @@
 # Configure a semi-closed FreeInference run
 
+For the combined synthetic workload, use
+[mega-8b200-medium.json](mega-8b200-medium.json): all eight Commit0 buckets plus
+Oolong, served by eight B200 TP1 replicas with JSQ and prefix caching off.
+The [baseline writeup](../../writeups/mega-8b200-baseline/README.md) documents
+trace preparation, arrival calibration, results, and reproduction commands.
+Use [mega-8b200-8s.json](mega-8b200-8s.json) for Poisson arrivals averaging eight
+seconds between root families. The [8s comparison](../../writeups/mega-8b200-8s/README.md)
+reports the same workload at the higher arrival rate.
+
 Edit one JSON file and invoke it from any working directory:
 
 ```bash
