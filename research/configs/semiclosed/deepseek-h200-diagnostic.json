@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "trace": {
+    "model": "deepseek-v4-flash",
+    "weeks": 10
+  },
+  "serving": {
+    "model": "deepseek-v4.1-flash",
+    "cluster": {
+      "hardware": "h200",
+      "gpus_per_node": 4,
+      "tp": 4,
+      "replicas": 1
+    },
+    "engine": {
+      "cache_dtype": "fp8",
+      "block_size": 64,
+      "max_num_batched_tokens": 8192,
+      "max_num_seqs": 1024,
+      "max_model_len": 1048576,
+      "gpu_memory_utilization": 0.8,
+      "engram_config": {
+        "cpu_offload": true
+      },
+      "speculative": {
+        "method": "dspark",
+        "num_spec_tokens": 5
+      }
+    },
+    "acceptance": {
+      "category": "coding",
+      "thinking": "off"
+    }
+  },
+  "run": {
+    "seed": 42,
+    "join_policy": "timing-inferred",
+    "series_interval_s": 0
+  },
+  "output": "../../outputs/semiclosed/deepseek-h200-week10"
+}

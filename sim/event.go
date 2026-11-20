@@ -44,6 +44,9 @@ func (e *ArrivalEvent) Execute(sim *Simulator) {
 
 	// The admission overhead (render + tokenize) runs on the endpoint's render stage when
 	// one is configured, so it queues behind earlier requests (INV-R1).
+	if sim.researchScheduler != nil {
+		sim.researchScheduler.admit(e.Request, e.time)
+	}
 	render := sim.latencyModel.QueueingTime(e.Request)
 	queuedAt := e.time + render
 	if sim.renderer != nil {

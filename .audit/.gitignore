@@ -1,0 +1,7 @@
+# Generated audit outputs; keep source scripts, design notes, and decision logs.
+*.log
+*.jsonl
+*.diff
+/request-oracle-probe/
+/request-split-legacy-parity/
+/request-split-catalog-index-refreshed

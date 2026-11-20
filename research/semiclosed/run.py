@@ -18,8 +18,10 @@ import sys
 
 if __package__:
     from .mix import parse_sources
+    from .policies import router_parameters, scheduler_config
 else:
     from mix import parse_sources
+    from policies import router_parameters, scheduler_config
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 COEFFICIENTS = [f"cost-model-{name}" for name in (
@@ -236,6 +238,8 @@ class RunPlan:
     scenario: str
     commands: tuple[tuple[str, ...], ...]
     router_config: str | None = None
+    scheduler_config: str | None = None
+    research_router_config: str | None = None
 
 
 def prepare(config: Path, *, output: Path | None = None, python: str | None = None,
@@ -276,7 +280,7 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
             raise ValueError("trace.start_ms must precede trace.end_ms")
     else:
         raise ValueError("trace.format must be freeinference or weka-dag")
-    serving = object_fields(raw["serving"], {"model", "cluster", "engine", "acceptance", "router",
+    serving = object_fields(raw["serving"], {"model", "cluster", "engine", "acceptance", "router", "scheduler",
                                              "engine_version", "coefficients"},
                             {"model", "cluster", "engine"}, "serving")
     serving_model = typed(serving["model"], str, "serving.model")
@@ -290,17 +294,27 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         raise ValueError("serving.coefficients must be distinct")
     layout = Layout.parse(serving["cluster"])
     engine, acceptance = parse_engine(serving["engine"], serving.get("acceptance"))
+    scheduling = scheduler_config(serving["scheduler"]) if "scheduler" in serving else None
+    scheduler_text = None
     router_config, router_source = None, None
+    research_router, router_parameters_text = None, None
     if "router" in serving:
-        router = object_fields(serving["router"], {"endpoint_picker_config"},
-                               {"endpoint_picker_config"}, "serving.router")
-        router_source = path_from(router["endpoint_picker_config"], config.parent,
-                                  "serving.router.endpoint_picker_config")
-        if not router_source.is_file():
-            raise ValueError(f"serving.router.endpoint_picker_config is not a file: {router_source}")
-        router_config = router_source.read_text()
-        if not router_config.strip():
-            raise ValueError("serving.router.endpoint_picker_config must not be empty")
+        router = object_fields(serving["router"], {"endpoint_picker_config", "research_policy", "parameters"},
+                               set(), "serving.router")
+        if "research_policy" in router:
+            if "endpoint_picker_config" in router:
+                raise ValueError("serving.router must select either endpoint_picker_config or research_policy")
+            research_router = router["research_policy"]
+            router_parameters_text = json_text(router_parameters(research_router, router.get("parameters", {})))
+        else:
+            object_fields(router, {"endpoint_picker_config"}, {"endpoint_picker_config"}, "serving.router")
+            router_source = path_from(router["endpoint_picker_config"], config.parent,
+                                      "serving.router.endpoint_picker_config")
+            if not router_source.is_file():
+                raise ValueError(f"serving.router.endpoint_picker_config is not a file: {router_source}")
+            router_config = router_source.read_text()
+            if not router_config.strip():
+                raise ValueError("serving.router.endpoint_picker_config must not be empty")
     run = object_fields(raw.get("run", {}), {"seed", "join_policy", "series_interval_s", "arrivals"}, set(), "run")
     seed = typed(run.get("seed", 42), int, "run.seed")
     if not -(2**63) <= seed < 2**63:
@@ -388,6 +402,17 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
                 replay += [flag, str(arrivals[field])]
     if acceptance:
         replay += ["--speculative-category", acceptance["category"], "--speculative-thinking", acceptance["thinking"]]
+    if research_router is not None:
+        replay += ["--research-router", research_router,
+                   "--research-router-config", str(output / "router.json"),
+                   "--research-router-decisions", str(output / "router-decisions.json")]
+    if scheduling:
+        if scheduling["name"] in ("fcfs", "sjf"):
+            replay += ["--scheduler", scheduling["name"]]
+        else:
+            scheduler_text = json_text({key: value for key, value in scheduling.items() if key != "name"})
+            replay += ["--research-scheduler", scheduling["name"],
+                       "--research-scheduler-config", str(output / "scheduler.json")]
     verifier = "verify_dag.py" if trace_format == "weka-dag" else "verify.py"
     verify = [*python_argv, str(REPOSITORY / "research/semiclosed" / verifier), "--input", str(input_path),
               "--report", str(output / "workload.json"), "--metrics", str(output / "metrics.json")]
@@ -414,16 +439,22 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         resolved["serving"]["router"] = {
             "endpoint_picker_config": str(router_source), "saved_config": str(output / "router.yaml"),
             "sha256": hashlib.sha256(router_config.encode()).hexdigest()}
+    if scheduling:
+        resolved["serving"]["scheduler"] = scheduling
+    if research_router is not None:
+        resolved["serving"]["router"] = {"research_policy": research_router,
+            "parameters": json.loads(router_parameters_text), "saved_config": str(output / "router.json")}
     commands = (tuple(conversion), ("go", "build", "-o", str(output / "blis"), "."),
                 tuple(replay), tuple(verify))
-    return RunPlan(output, resolved, original, scenario_text, commands, router_config)
+    return RunPlan(output, resolved, original, scenario_text, commands, router_config, scheduler_text, router_parameters_text)
 
 
 def describe(plan: RunPlan) -> None:
     print(f"Trace model: {plan.resolved['trace'].get('model', 'from explicit DAG input')}")
     print(f"Serving model: {plan.resolved['serving']['model']}")
     if "router" in plan.resolved["serving"]:
-        print(f"Router config: {plan.resolved['serving']['router']['endpoint_picker_config']}")
+        router = plan.resolved["serving"]["router"]
+        print(f"Router: {router.get('research_policy', router.get('endpoint_picker_config'))}")
     for source in plan.resolved["trace"].get("sources", []):
         print(f"DAG source: {source['path']} ({source['copies']} copies)")
     for ordinal in plan.resolved["trace"].get("weeks", []):
@@ -441,6 +472,10 @@ def execute(plan: RunPlan) -> int:
     (plan.output / "scenario.yaml").write_text(plan.scenario)
     if plan.router_config is not None:
         (plan.output / "router.yaml").write_text(plan.router_config)
+    if plan.scheduler_config is not None:
+        (plan.output / "scheduler.json").write_text(plan.scheduler_config)
+    if plan.research_router_config is not None:
+        (plan.output / "router.json").write_text(plan.research_router_config)
     (plan.output / "commands.json").write_text(json_text(plan.commands))
     (plan.output / "commands.log").write_text("".join(shlex.join(argv) + "\n" for argv in plan.commands))
     with (plan.output / "run.log").open("w") as log:
@@ -493,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
             print("Generated scenario:\n" + plan.scenario, end="")
             if plan.router_config is not None:
                 print("Router configuration:\n" + plan.router_config, end="")
+            if plan.scheduler_config is not None:
+                print("Research scheduler configuration:\n" + plan.scheduler_config, end="")
+            if plan.research_router_config is not None:
+                print("Research router configuration:\n" + plan.research_router_config, end="")
             print(f"Command working directory: {REPOSITORY}")
             for command in plan.commands:
                 print(shlex.join(command))

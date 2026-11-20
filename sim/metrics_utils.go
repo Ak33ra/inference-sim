@@ -92,31 +92,32 @@ func NewRequestMetrics(req *Request, arrivedAt float64) RequestMetrics {
 
 // MetricsOutput defines the JSON structure for the saved metrics
 type MetricsOutput struct {
-	InstanceID           string  `json:"instance_id"`
-	CompletedRequests    int     `json:"completed_requests"`
-	StillQueued          int     `json:"still_queued"`
-	StillRunning         int     `json:"still_running"`
-	InjectedRequests     int     `json:"injected_requests"`
-	TotalInputTokens     int     `json:"total_input_tokens"`
-	TotalOutputTokens    int     `json:"total_output_tokens"`
-	VllmDurationSec      float64 `json:"vllm_estimated_duration_s"`
-	ResponsesPerSec      float64 `json:"responses_per_sec"`
-	TokensPerSec         float64 `json:"tokens_per_sec"`
-	E2EMeanMs            float64 `json:"e2e_mean_ms"`
-	E2EP90Ms             float64 `json:"e2e_p90_ms"`
-	E2EP95Ms             float64 `json:"e2e_p95_ms"`
-	E2EP99Ms             float64 `json:"e2e_p99_ms"`
-	TTFTMeanMs           float64 `json:"ttft_mean_ms"`
-	TTFTP90Ms            float64 `json:"ttft_p90_ms"`
-	TTFTP95Ms            float64 `json:"ttft_p95_ms"`
-	TTFTP99Ms            float64 `json:"ttft_p99_ms"`
-	ITLMeanMs            float64 `json:"itl_mean_ms"`
-	ITLP90Ms             float64 `json:"itl_p90_ms"`
-	ITLP95Ms             float64 `json:"itl_p95_ms"`
-	ITLP99Ms             float64 `json:"itl_p99_ms"`
-	SchedulingDelayP99Ms float64 `json:"scheduling_delay_p99_ms"`
-	KVAllocationFailures int64   `json:"kv_allocation_failures,omitempty"`
-	PreemptionCount      int64   `json:"preemption_count"`
+	ResearchScheduler    *ResearchSchedulerReport `json:"research_scheduler,omitempty"`
+	InstanceID           string                   `json:"instance_id"`
+	CompletedRequests    int                      `json:"completed_requests"`
+	StillQueued          int                      `json:"still_queued"`
+	StillRunning         int                      `json:"still_running"`
+	InjectedRequests     int                      `json:"injected_requests"`
+	TotalInputTokens     int                      `json:"total_input_tokens"`
+	TotalOutputTokens    int                      `json:"total_output_tokens"`
+	VllmDurationSec      float64                  `json:"vllm_estimated_duration_s"`
+	ResponsesPerSec      float64                  `json:"responses_per_sec"`
+	TokensPerSec         float64                  `json:"tokens_per_sec"`
+	E2EMeanMs            float64                  `json:"e2e_mean_ms"`
+	E2EP90Ms             float64                  `json:"e2e_p90_ms"`
+	E2EP95Ms             float64                  `json:"e2e_p95_ms"`
+	E2EP99Ms             float64                  `json:"e2e_p99_ms"`
+	TTFTMeanMs           float64                  `json:"ttft_mean_ms"`
+	TTFTP90Ms            float64                  `json:"ttft_p90_ms"`
+	TTFTP95Ms            float64                  `json:"ttft_p95_ms"`
+	TTFTP99Ms            float64                  `json:"ttft_p99_ms"`
+	ITLMeanMs            float64                  `json:"itl_mean_ms"`
+	ITLP90Ms             float64                  `json:"itl_p90_ms"`
+	ITLP95Ms             float64                  `json:"itl_p95_ms"`
+	ITLP99Ms             float64                  `json:"itl_p99_ms"`
+	SchedulingDelayP99Ms float64                  `json:"scheduling_delay_p99_ms"`
+	KVAllocationFailures int64                    `json:"kv_allocation_failures,omitempty"`
+	PreemptionCount      int64                    `json:"preemption_count"`
 	// CacheHitRate is the aggregate KV-cache hit rate (a fraction in [0,1]) at
 	// finalization (#1583). It is populated ONLY into the --metrics-path file (the
 	// file branch of EmitOutput), alongside the file-only Requests[] — never onto

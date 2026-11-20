@@ -60,6 +60,42 @@ The path is relative to the JSON config. The launcher snapshots the profile as
 and points the generated deployment at that snapshot. See the
 [routing guide](../../../docs/guide/routing.md) for supported plugins.
 
+For the opt-in research policies, select a router and scheduler inside `serving`:
+
+```json
+"router": {"research_policy": "jsq"},
+"scheduler": {"name": "atlas"}
+```
+
+Research routers are `jsq`, `least-token`, `random`, `agentix`, and `preble-e2`.
+They use a shared gateway implementation with an outstanding-request ledger.
+Select either `research_policy` or `endpoint_picker_config`. The latter keeps
+the existing llm-d implementation. Research router parameters are saved in
+`router.json`, and decisions are saved in `router-decisions.json`.
+
+Schedulers are native `fcfs` and input-length `sjf`, plus research `mlfq` and
+`atlas`. The feedback schedulers accept `quanta_ms` and `starvation_ratio` in
+the scheduler object. See the [scheduler guide](../../../docs/guide/research-scheduler.md)
+for defaults, instrumentation, and the recomputation backend's limitations.
+Omitting these fields preserves existing behavior.
+
+Preble needs explicit cost estimates and a cold-start output-length prior:
+
+```json
+"router": {
+  "research_policy": "preble-e2",
+  "parameters": {
+    "history_window_s": 180,
+    "prefill_us_per_token": 6.709040633625577,
+    "decode_us_per_token": 2362.0455729166665,
+    "initial_output_tokens": 128
+  }
+}
+```
+
+These costs are calibrated for this study's GPT-OSS-120B MXFP4 B200 TP1 engine.
+Use new calibration measurements for another model or hardware configuration.
+
 Preview the resolved dates, layout, scenario, and commands before a large run:
 
 ```bash

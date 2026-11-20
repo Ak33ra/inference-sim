@@ -1,0 +1,1 @@
+Independent Astra review found no oracle, routing, denominator or paired-statistics blocker. Accepted and fixed: GIT_OPTIONAL_LOCKS=0 before calibration, reference/control trace identity before init outputs, complete direct CLI example, one redundant oracle comment removed. No HOLD or MUST KILL findings. Frozen Python helpers unchanged. Root verified fixes in final 15-file delta.

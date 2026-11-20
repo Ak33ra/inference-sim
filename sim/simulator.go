@@ -64,6 +64,7 @@ func (eq *EventQueue) Pop() any {
 // Sub-configs are embedded so fields are accessible via promotion
 // (e.g., cfg.TotalKVBlocks resolves to cfg.KVCacheConfig.TotalKVBlocks).
 type SimConfig struct {
+	ResearchScheduler *ResearchSchedulerRuntime
 	// Simulation control (no sub-config — no factory uses only these)
 	Horizon int64
 	Seed    int64
@@ -110,8 +111,10 @@ type SimConfig struct {
 
 // Simulator is the core object that holds simulation time, system state, and the event loop.
 type Simulator struct {
-	Clock   int64
-	Horizon int64
+	admissionSource   AdmissionSource
+	researchScheduler *researchScheduler
+	Clock             int64
+	Horizon           int64
 	// eventQueue has all the simulator events, like arrival and step events
 	eventQueue EventQueue
 	// WaitQ aka request waiting queue before it is scheduled
@@ -362,6 +365,15 @@ func NewSimulator(cfg SimConfig, kvStore KVStore, latencyModel LatencyModel) (*S
 		logrus.Warnf("adapters and adapter_capacity are configured but sim/lora is not linked (NewResidentAdapterSetFunc/NewAdapterCostFunc unregistered); resident-adapter tracking is disabled and adapter metrics will be zero")
 	}
 
+	if cfg.ResearchScheduler != nil {
+		if cfg.Offload.IsEnabled() || cfg.KVCPUBlocks > 0 || cfg.SpeculativeConfig.IsEnabled() || cfg.HasAdapters() {
+			return nil, fmt.Errorf("research scheduler requires no offload, speculative decoding or LoRA")
+		}
+		if _, ok := kvStore.(DeferredKVRegistration); !ok {
+			return nil, fmt.Errorf("research scheduler requires deferred KV registration")
+		}
+		s.researchScheduler = newResearchScheduler(cfg.ResearchScheduler)
+	}
 	return s, nil
 }
 
@@ -719,67 +731,10 @@ func (sim *Simulator) EnqueueRequest(r *Request) {
 		return
 	}
 
-	// Auto-fill: if client didn't set a budget, cap at remaining context window.
-	if r.MaxOutputLen == 0 && sim.maxModelLen > 0 && r.InputLen() < sim.maxModelLen {
-		r.MaxOutputLen = int(sim.maxModelLen) - int(r.InputLen())
-	}
-
-	// Guard 0: Negative MaxOutputLen check (R3)
-	if r.MaxOutputLen < 0 {
-		logrus.Warnf("dropping request %s: MaxOutputLen %d is negative",
-			r.ID, r.MaxOutputLen)
+	if why := normalizeAdmission(r, sim.maxModelLen, sim.KVCache.BlockSize(), sim.KVCache.TotalCapacity()); why != nil {
+		logrus.Warn(why.reason)
 		sim.Metrics.DroppedUnservable++
-		sim.Metrics.RecordUnserved(r, false)
-		delete(sim.Metrics.Requests, r.ID)
-		// Callback for dropped requests (R1: don't silently discard, BC-17)
-		if sim.OnRequestDone != nil {
-			for _, next := range sim.OnRequestDone(r, sim.Clock) {
-				sim.InjectArrival(next)
-			}
-		}
-		return
-	}
-
-	// Guard 1: MaxModelLen check
-	if sim.maxModelLen > 0 {
-		if r.InputLen() >= sim.maxModelLen {
-			logrus.Warnf("dropping request %s: input length %d >= MaxModelLen %d (no room for output)",
-				r.ID, r.InputLen(), sim.maxModelLen)
-			sim.Metrics.DroppedUnservable++
-			sim.Metrics.RecordUnserved(r, true)
-			delete(sim.Metrics.Requests, r.ID)
-			if sim.OnRequestDone != nil {
-				for _, next := range sim.OnRequestDone(r, sim.Clock) {
-					sim.InjectArrival(next)
-				}
-			}
-			return
-		}
-		if r.MaxOutputLen > 0 {
-			totalSeqLen := r.InputLen() + int64(r.MaxOutputLen)
-			if totalSeqLen > sim.maxModelLen {
-				logrus.Warnf("dropping request %s: total sequence length %d (input=%d + budget=%d) exceeds MaxModelLen %d",
-					r.ID, totalSeqLen, r.InputLen(), r.MaxOutputLen, sim.maxModelLen)
-				sim.Metrics.DroppedUnservable++
-				sim.Metrics.RecordUnserved(r, true)
-				delete(sim.Metrics.Requests, r.ID)
-				if sim.OnRequestDone != nil {
-					for _, next := range sim.OnRequestDone(r, sim.Clock) {
-						sim.InjectArrival(next)
-					}
-				}
-				return
-			}
-		}
-	}
-
-	// Guard 2: KV capacity check (defense-in-depth, always active)
-	blocksNeeded := (r.InputLen() + sim.KVCache.BlockSize() - 1) / sim.KVCache.BlockSize()
-	if blocksNeeded > sim.KVCache.TotalCapacity() {
-		logrus.Warnf("dropping request %s: input requires %d KV blocks but cache has only %d total",
-			r.ID, blocksNeeded, sim.KVCache.TotalCapacity())
-		sim.Metrics.DroppedUnservable++
-		sim.Metrics.RecordUnserved(r, false)
+		sim.Metrics.RecordUnserved(r, why.contextOverflow)
 		delete(sim.Metrics.Requests, r.ID)
 		if sim.OnRequestDone != nil {
 			for _, next := range sim.OnRequestDone(r, sim.Clock) {
@@ -816,6 +771,10 @@ func (sim *Simulator) EnqueueRequest(r *Request) {
 	}
 	r.Priority = float64(sim.sloMap.InvertForVLLM(r.SLOClass))
 
+	if sim.researchScheduler != nil {
+		sim.researchScheduler.admit(r, sim.Clock)
+		sim.researchScheduler.calls[r.ID].last = sim.Clock
+	}
 	sim.WaitQ.Enqueue(r)
 
 	// Schedule timeout event (after all guards + enqueue — BC-5)
@@ -1017,7 +976,7 @@ func (sim *Simulator) recordRequestCompletion(req *Request) {
 // sim.stepEvent here prevents future QueuedEvent INV-8 guards from seeing a stale
 // non-nil pointer and skipping their step-scheduling.
 func (sim *Simulator) Step(now int64) {
-	if sim.RunningBatch == nil && sim.WaitQ.Len() == 0 {
+	if sim.RunningBatch == nil && sim.WaitQ.Len() == 0 && !sim.hasAdmissionReady() {
 		sim.stepEvent = nil
 		if sim.abortPending {
 			// The step after an abort that left nothing to run: it publishes the engine's
@@ -1073,6 +1032,7 @@ func (sim *Simulator) scheduleBatch(now int64) {
 	// Delegate batch composition to the pluggable BatchFormation strategy.
 	// Event scheduling and metrics recording happen after FormBatch returns (kernel concerns).
 	batchCtx := BatchContext{
+		NewRequests:           sim.admissionSource,
 		RunningBatch:          sim.RunningBatch,
 		WaitQ:                 sim.WaitQ,
 		KVCache:               sim.KVCache,
@@ -1095,7 +1055,12 @@ func (sim *Simulator) scheduleBatch(now int64) {
 		batchCtx.SpecVerifyWidth = sim.specVerifyWidth
 		batchCtx.DraftSlots = sim.specDraftSlots
 	}
-	batchResult := sim.batchFormation.FormBatch(batchCtx)
+	var batchResult BatchResult
+	if sim.researchScheduler != nil {
+		batchResult = sim.researchScheduler.form(batchCtx, sim.batchFormation)
+	} else {
+		batchResult = sim.batchFormation.FormBatch(batchCtx)
+	}
 
 	// Apply result: update running batch
 	sim.RunningBatch = batchResult.RunningBatch
@@ -1114,7 +1079,9 @@ func (sim *Simulator) scheduleBatch(now int64) {
 			time:    now,
 			Request: s.Request,
 		})
-		sim.Metrics.RequestSchedulingDelays[s.Request.ID] = now - s.Request.ArrivalTime
+		if _, recorded := sim.Metrics.RequestSchedulingDelays[s.Request.ID]; sim.researchScheduler == nil || !recorded {
+			sim.Metrics.RequestSchedulingDelays[s.Request.ID] = now - s.Request.ArrivalTime
+		}
 		sim.Metrics.recordPrefixLookup(s.Request, s.Lookup)
 		if sim.serverSeries != nil {
 			sim.serverSeries.recordAdmission(now, s.Request, s.Lookup)
@@ -1280,6 +1247,13 @@ func (sim *Simulator) executeBatchStep(now int64) int64 {
 	// Phase 1 preemption cascade). The LatencyModel contract requires StepTime to
 	// handle an empty batch (return >= 1), and the max(1, ...) floor below guarantees INV-3.
 	currStepAdvance := sim.latencyModel.StepTime(sim.scheduledRequests())
+	if sim.researchScheduler != nil {
+		sim.researchScheduler.executed(sim.scheduledRequests(), now+currStepAdvance, currStepAdvance, sim.reqNumComputedTokens)
+		store := sim.KVCache.(DeferredKVRegistration)
+		for _, req := range sim.scheduledRequests() {
+			store.CommitKVBlocks(req, sim.reqNumComputedTokens[req.ID])
+		}
+	}
 
 	// Add transfer latency from CPU→GPU reloads (0 for single-tier)
 	currStepAdvance += sim.KVCache.ConsumePendingTransferLatency()
@@ -1416,6 +1390,9 @@ func (sim *Simulator) processCompletions(now, currStepAdvance int64) []*Request 
 			if len(req.OutputTokens) > 0 && req.ProgressIndex < req.InputLen()+util.Len64(req.OutputTokens) {
 				ok := sim.KVCache.AllocateKVBlocks(req, req.ProgressIndex, req.ProgressIndex+1, []int64{})
 				if !ok {
+					if sim.admissionSource != nil {
+						panic("nonpreemptive final-token KV allocation failed: " + req.ID)
+					}
 					logrus.Errorf("[tick %07d] KV allocation failed for completing request %s (request will still complete) — this indicates a cache accounting bug", now, req.ID)
 					sim.Metrics.KVAllocationFailures++
 				}
@@ -1427,6 +1404,9 @@ func (sim *Simulator) processCompletions(now, currStepAdvance int64) []*Request 
 			sim.releaseFinishedKV(req)
 			req.FinishedStepIdx = sim.stepCount
 			req.DepartureTime = now + currStepAdvance
+			if sim.researchScheduler != nil {
+				sim.researchScheduler.completed(req, now+currStepAdvance)
+			}
 			sim.Schedule(&RequestLeftEvent{
 				time:    req.DepartureTime,
 				Request: req,
@@ -1489,6 +1469,9 @@ func (sim *Simulator) processCompletions(now, currStepAdvance int64) []*Request 
 			sim.releaseFinishedKV(req)
 			req.FinishedStepIdx = sim.stepCount
 			req.DepartureTime = now + currStepAdvance
+			if sim.researchScheduler != nil {
+				sim.researchScheduler.completed(req, now+currStepAdvance)
+			}
 			sim.Schedule(&RequestLeftEvent{
 				time:    req.DepartureTime,
 				Request: req,
@@ -1607,7 +1590,7 @@ func (sim *Simulator) scheduleNextStep(now, currStepAdvance int64, remaining []*
 		// before this optimization. Clamped, the step fires AT the horizon, admits
 		// nothing, and the next step at horizon+1 ends the run with the clock at the
 		// horizon, exactly as the crawl did. Inert at the default unlimited horizon.
-		if sim.WaitQ.Len() > 0 && sim.loadingAdapter == "" {
+		if (sim.WaitQ.Len() > 0 || sim.hasAdmissionReady()) && sim.loadingAdapter == "" {
 			if sim.canPark() {
 				sim.parkIdle(now+currStepAdvance, currStepAdvance)
 				return

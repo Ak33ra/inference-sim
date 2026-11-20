@@ -9,6 +9,10 @@
 !/configs/semiclosed/commit0-overlap-*.json
 !/configs/semiclosed/mega-8b200-medium.json
 !/configs/semiclosed/mega-8b200-8s.json
+!/configs/semiclosed/deepseek-h200-2replicas.json
+!/configs/semiclosed/deepseek-h200-diagnostic.json
+!/configs/semiclosed/glm52-all.json
+!/configs/semiclosed/glm52-smoke.json
 !/configs/routers/*.yaml
 !/analysis/requirements.txt
 !/notebooks/semiclosed_analysis.ipynb

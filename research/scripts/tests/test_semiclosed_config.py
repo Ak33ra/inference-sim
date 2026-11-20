@@ -109,6 +109,53 @@ class ConfigRunTests(unittest.TestCase):
                     self.plan()
         self.assertFalse((self.root / "results/run").exists())
 
+    def test_scheduler_selection_and_feedback_snapshot(self):
+        self.config["serving"]["scheduler"] = {"name": "sjf"}
+        plan = self.plan()
+        replay = plan.commands[2]
+        self.assertEqual(replay[replay.index("--scheduler") + 1], "sjf")
+        self.assertIsNone(plan.scheduler_config)
+        self.config["serving"]["scheduler"] = {"name": "atlas", "quanta_ms": [10, 20], "starvation_ratio": 4}
+        plan = self.plan()
+        replay = plan.commands[2]
+        self.assertEqual(replay[replay.index("--research-scheduler") + 1], "atlas")
+        self.assertEqual(replay[replay.index("--research-scheduler-config") + 1], str(plan.output / "scheduler.json"))
+        self.assertEqual(json.loads(plan.scheduler_config), {"quanta_ms": [10, 20], "starvation_ratio": 4})
+        self.assertEqual(plan.resolved["serving"]["scheduler"], self.config["serving"]["scheduler"])
+
+    def test_invalid_scheduler_fails_before_output(self):
+        for scheduling in ({"name": "unknown"}, {"name": "fcfs", "quanta_ms": [1]},
+                           {"name": "atlas", "quanta_ms": []}, {"name": "atlas", "quanta_ms": [2, 1]},
+                           {"name": "atlas", "quanta_ms": [True]}, {"name": "atlas", "starvation_ratio": 0}):
+            with self.subTest(scheduling=scheduling):
+                self.config["serving"]["scheduler"] = scheduling
+                with self.assertRaisesRegex(ValueError, "scheduler"):
+                    self.plan()
+        self.assertFalse((self.root / "results/run").exists())
+
+    def test_research_router_snapshot_and_flags(self):
+        self.config["serving"]["router"] = {"research_policy": "agentix", "parameters": {"latency_us": 5}}
+        plan = self.plan()
+        replay = plan.commands[2]
+        self.assertEqual(replay[replay.index("--research-router") + 1], "agentix")
+        self.assertEqual(json.loads(plan.research_router_config), {"latency_us": 5})
+        _, deployment = map(json.loads, plan.scenario.split("---\n"))
+        self.assertNotIn("router", deployment)
+        self.assertEqual(execute(replace(plan, commands=())), 0)
+        self.assertEqual(json.loads((plan.output / "router.json").read_text()), {"latency_us": 5})
+
+    def test_invalid_research_router_fails_before_output(self):
+        for router in ({"research_policy": "unknown"},
+                       {"research_policy": "jsq", "endpoint_picker_config": "x"},
+                       {"research_policy": "jsq", "parameters": {"output_tokens": 7}},
+                       {"research_policy": "jsq", "parameters": {"latency_us": .5}},
+                       {"research_policy": "preble-e2"}):
+            with self.subTest(router=router):
+                self.config["serving"]["router"] = router
+                with self.assertRaisesRegex(ValueError, "router"):
+                    self.plan()
+        self.assertFalse((self.root / "results/run").exists())
+
     def test_mixed_dag_sources_resolve_without_changing_arrival_rate(self):
         source = self.root / "synthetic.jsonl"
         source.write_text("{}")

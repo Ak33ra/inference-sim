@@ -421,6 +421,7 @@ type EmitOption func(*emitOptions)
 
 // emitOptions is the resolved option set for one EmitOutput call.
 type emitOptions struct {
+	research   *ResearchSchedulerReport
 	catalog    *CatalogProvenance
 	overrides  []ScenarioOverride
 	provenance map[string]KernelPoolProvenance
@@ -530,6 +531,7 @@ func (m *Metrics) EmitOutput(output MetricsOutput, outputFilePath string, opts .
 		output.Agentic = resolvedOpts.agentic
 		output.PD = resolvedOpts.pd
 		output.ServerSeries = resolvedOpts.series
+		output.ResearchScheduler = resolvedOpts.research
 		if resolvedOpts.provenance != nil {
 			output.KernelProvenance = &resolvedOpts.provenance
 		}
@@ -596,4 +598,8 @@ func sortedRequestIDs(requests map[string]RequestMetrics) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func WithResearchScheduler(r *ResearchSchedulerRuntime) EmitOption {
+	return func(o *emitOptions) { o.research = r.Snapshot() }
 }

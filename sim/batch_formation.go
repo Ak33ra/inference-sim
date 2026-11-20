@@ -23,6 +23,13 @@ type BatchFormation interface {
 // increment ComputedTokens[req.ID] to the total computed tokens (including
 // cached). Phase 2 of Step() reads this map to advance ProgressIndex.
 type BatchContext struct {
+	NewRequests AdmissionSource
+	// AdmissionVictim optionally selects a running victim when queued admission
+	// cannot allocate KV. A negative index leaves the request queued; nil preserves
+	// native admission behavior.
+	AdmissionVictim       func(queued *Request, running []*Request) int
+	DeferKVRegistration   bool
+	PreservePrefillCap    bool
 	RunningBatch          *Batch
 	WaitQ                 *WaitQueue
 	KVCache               KVStore
@@ -191,7 +198,11 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 	// request, running or waiting: there is nobody for a long prefill to starve
 	// (vllm/v1/core/sched/scheduler.py:611-626, get_request_counts :2549-2551; vLLM #57951).
 	prefillCap := ctx.PrefillTokenThreshold
-	if len(result.RunningBatch.Requests)+ctx.WaitQ.Len() <= 1 {
+	waiting := ctx.WaitQ.Len()
+	if ctx.NewRequests != nil {
+		waiting = ctx.NewRequests.Len()
+	}
+	if !ctx.PreservePrefillCap && len(result.RunningBatch.Requests)+waiting <= 1 {
 		prefillCap = 0
 	}
 
@@ -365,8 +376,14 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 	// cursor: with no deferrals it stays 0, so PeekAt(0)==Peek() and admissions use
 	// DequeueBatch — identical to the pre-#1591 head-only loop.
 	skipped := 0
-	for len(result.RunningBatch.Requests) < int(ctx.MaxNumSeqs) && ctx.WaitQ.Len() > skipped && bud.open() && !result.PreemptionHappened {
+	for len(result.RunningBatch.Requests) < int(ctx.MaxNumSeqs) && (ctx.WaitQ.Len() > skipped || (ctx.NewRequests != nil && ctx.NewRequests.Len() > 0)) && bud.open() && !result.PreemptionHappened {
 		next := ctx.WaitQ.PeekAt(skipped)
+		if ctx.NewRequests != nil {
+			next = ctx.NewRequests.Peek()
+		}
+		if next == nil {
+			break
+		}
 
 		// A request whose secondary-tier fetch is still in flight is not admittable
 		// this step — set it aside and try the next (offload only; inert otherwise).
@@ -453,10 +470,10 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 				}
 				scheduled = max(decodeTokens, w)
 			}
-			if ok := ctx.KVCache.AllocateKVBlocks(next, next.ProgressIndex, next.ProgressIndex+scheduled, nil); !ok {
+			if ok := allocateBatchKV(ctx, next, next.ProgressIndex, next.ProgressIndex+scheduled, nil); !ok {
 				break
 			}
-			dequeueAdmitted(ctx.WaitQ, next, skipped)
+			commitBatchAdmission(ctx, next, skipped, len(result.RunningBatch.Requests)+1, ctx.MaxNumBatchedTokens-bud.tokens+scheduled)
 			result.RunningBatch.Requests = append(result.RunningBatch.Requests, next)
 			next.ScheduledStepIdx = ctx.StepCount
 			result.NewlyScheduled = append(result.NewlyScheduled, ScheduledRequest{Request: next})
@@ -487,17 +504,11 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 		if holder != nil {
 			loadedTo, loadGPUHit, loaded = holder.LoadedPrefix(next.ID)
 		}
-		maxHitBlocks := max(next.PrefillEnd()-1, 0) / ctx.KVCache.BlockSize()
 		var cachedBlocks []int64
-		if !ctx.PrefixCachingDisabled && !loaded {
-			cachedBlocks = ctx.KVCache.GetCachedBlocks(next.FullInputTokens())
-			if util.Len64(cachedBlocks) > maxHitBlocks {
-				cachedBlocks = cachedBlocks[:maxHitBlocks]
-			}
-			if reconciler != nil {
-				cachedBlocks = reconciler.ReconcilePrefixHit(next, cachedBlocks)
-			}
+		if !loaded {
+			cachedBlocks = admissionCachedPrefix(next, ctx.KVCache, ctx.PrefixCachingDisabled)
 		}
+
 		startIndex := util.Len64(cachedBlocks) * ctx.KVCache.BlockSize()
 		if loaded {
 			startIndex = loadedTo
@@ -563,7 +574,7 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 		// reload happens inside it, committing [startIndex, computedStart) and allocating
 		// the tail [computedStart, endIndex). Passing computedStart directly would treat the
 		// reloadable prefix as already GPU-committed, which it is not yet.
-		if ok := ctx.KVCache.AllocateKVBlocks(next, startIndex, endIndex, cachedBlocks); !ok {
+		if ok := allocateBatchKV(ctx, next, startIndex, endIndex, cachedBlocks); !ok {
 			// H3: distinguish a fresh deferral (the offload chain set this request
 			// aside for a secondary fetch — skip and keep it in the WaitQ) from
 			// genuine GPU pressure (break, head-of-line as before).
@@ -571,10 +582,23 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 				skipped++
 				continue
 			}
+			if ctx.AdmissionVictim != nil {
+				if index := ctx.AdmissionVictim(next, result.RunningBatch.Requests); index >= 0 {
+					victim := result.RunningBatch.Requests[index]
+					bud.credit(victim.scheduledTokens)
+					victim.NumNewTokens = 0
+					victim.scheduledTokens = 0
+					resetPreemptedRequest(victim, ctx)
+					result.RunningBatch.Requests = append(result.RunningBatch.Requests[:index], result.RunningBatch.Requests[index+1:]...)
+					result.Preempted = append(result.Preempted, PreemptedRequest{Request: victim})
+					ctx.WaitQ.Enqueue(victim)
+					continue
+				}
+			}
 			break
 		}
 
-		dequeueAdmitted(ctx.WaitQ, next, skipped)
+		commitBatchAdmission(ctx, next, skipped, len(result.RunningBatch.Requests)+1, ctx.MaxNumBatchedTokens-bud.tokens+numNewTokens)
 		result.RunningBatch.Requests = append(result.RunningBatch.Requests, next)
 		next.ScheduledStepIdx = ctx.StepCount
 
@@ -609,6 +633,22 @@ func (v *VLLMBatchFormation) FormBatch(ctx BatchContext) BatchResult {
 	return result
 }
 
+func commitBatchAdmission(ctx BatchContext, req *Request, skipped, batchSize int, scheduled int64) {
+	if ctx.NewRequests == nil {
+		dequeueAdmitted(ctx.WaitQ, req, skipped)
+		return
+	}
+	ctx.NewRequests.Admit(req, ctx.Now, AdmissionEvidence{BatchSize: batchSize, ScheduledTokens: scheduled,
+		UsedKVBlocks: ctx.KVCache.UsedBlocks(), PromisedKVBlocks: ctx.KVCache.(LifecycleKVStore).PromisedBlocks(), TotalKVBlocks: ctx.KVCache.TotalCapacity()})
+}
+
+func allocateBatchKV(ctx BatchContext, req *Request, start, end int64, cached []int64) bool {
+	if ctx.DeferKVRegistration {
+		return ctx.KVCache.(DeferredKVRegistration).AllocateKVBlocksDeferred(req, start, end, cached)
+	}
+	return ctx.KVCache.AllocateKVBlocks(req, start, end, cached)
+}
+
 // dequeueAdmitted removes the just-admitted request from the wait queue. When no
 // requests were skipped this step it is the head, removed via the O(1) DequeueBatch
 // (the pre-#1591 fast path, preserving byte-identity when offload is off); when
@@ -631,7 +671,10 @@ func dequeueAdmitted(wq *WaitQueue, req *Request, skipped int) {
 func (v *VLLMBatchFormation) preemptForTokens(req *Request, numNewTokens int64, result *BatchResult, ctx BatchContext, bud *stepBudget, reqIndex int) (bool, int) {
 	adjustment := 0
 	for {
-		if ok := ctx.KVCache.AllocateKVBlocks(req, req.ProgressIndex, req.ProgressIndex+numNewTokens, nil); !ok {
+		if ok := allocateBatchKV(ctx, req, req.ProgressIndex, req.ProgressIndex+numNewTokens, nil); !ok {
+			if ctx.NewRequests != nil {
+				panic("nonpreemptive KV continuation allocation failed: " + req.ID)
+			}
 			// Circuit breaker: empty batch means cache is too small (R19)
 			if len(result.RunningBatch.Requests) == 0 {
 				logrus.Warnf("[tick %07d] preemption: KV cache too small for request %s (need %d tokens, no running requests to evict)",
@@ -703,15 +746,7 @@ func (v *VLLMBatchFormation) preemptForTokens(req *Request, numNewTokens int64, 
 			// A decoding request at ProgressIndex p has p - InputLen + 1 output tokens out (the
 			// first is the prefill's), so its resumed prefill covers p + 1 tokens; one preempted
 			// inside a resumed prefill keeps the resume it had.
-			if preemptedRequest.TTFTSet && preemptedRequest.ProgressIndex >= preemptedRequest.PrefillEnd() {
-				preemptedRequest.resumeEnd = preemptedRequest.ProgressIndex + 1
-			}
-			preemptedRequest.State = StateQueued
-			preemptedRequest.ProgressIndex = 0
-			preemptedRequest.preemptions++
-			preemptedRequest.specDecodeCarry = 0 // spec tokens are dropped on preemption (scheduler.py:1561-1562)
-			ctx.KVCache.ReleaseKVBlocks(preemptedRequest)
-			delete(ctx.ComputedTokens, preemptedRequest.ID)
+			resetPreemptedRequest(preemptedRequest, ctx)
 			ctx.WaitQ.PrependFront(preemptedRequest)
 
 			if preemptedRequest == req {
@@ -761,4 +796,31 @@ func NewBatchFormation(preemptionPolicy string) BatchFormation {
 	return &VLLMBatchFormation{
 		preemptionPolicy: policy,
 	}
+}
+
+func resetPreemptedRequest(req *Request, ctx BatchContext) {
+	if req.TTFTSet && req.ProgressIndex >= req.PrefillEnd() {
+		req.resumeEnd = req.ProgressIndex + 1
+	}
+	req.State = StateQueued
+	req.ProgressIndex = 0
+	req.preemptions++
+	req.specDecodeCarry = 0 // spec tokens are dropped on preemption (scheduler.py:1561-1562)
+	ctx.KVCache.ReleaseKVBlocks(req)
+	delete(ctx.ComputedTokens, req.ID)
+}
+
+func admissionCachedPrefix(req *Request, store KVStore, disabled bool) []int64 {
+	if disabled {
+		return nil
+	}
+	cached := store.GetCachedBlocks(req.FullInputTokens())
+	limit := max(req.PrefillEnd()-1, 0) / store.BlockSize()
+	if int64(len(cached)) > limit {
+		cached = cached[:limit]
+	}
+	if reconciler, ok := store.(PrefixHitReconciler); ok {
+		cached = reconciler.ReconcilePrefixHit(req, cached)
+	}
+	return cached
 }

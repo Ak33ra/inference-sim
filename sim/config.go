@@ -118,6 +118,9 @@ func WithKVTransferTicksPerBlock(ticks int64) KVCacheOption {
 // max_admission_blocks_per_request cap only as an admission gate; both are in blocks of the
 // shared pool.
 type KVSequenceState struct {
+	// LifecyclePeak bounds Hold for every non-speculative step within tokens. Nil is
+	// unsupported by optional nonpreemptive admission when Hold is present.
+	LifecyclePeak func(tokens int64) int64
 	// Hold is the blocks a sequence's state holds once computed tokens are computed and
 	// inFlight more are scheduled this step (the kernel's SequenceBoundedBytesAt). Nil: the
 	// model has no bounded per-sequence state.
