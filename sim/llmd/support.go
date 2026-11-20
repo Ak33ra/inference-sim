@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -132,6 +133,12 @@ const notAudited = "it has not been audited for the hosting runtime"
 // allow is BLIS's plugin policy, passed to the router as embed.Config.Allow.
 func allow(typ string) (bool, string) {
 	if supported[typ] {
+		return true, ""
+	}
+	// Research (research/writeups/three-tier-routing): semi-closed DAG families may carry a
+	// slo_class, sent as the objective header this handler selects a profile by. Opt-in, since
+	// the stock fork refuses the type; that writeup's setup builds against a patched fork.
+	if typ == "header-profile-handler" && os.Getenv("BLIS_RESEARCH_ALLOW_HEADER_PROFILE") == "1" {
 		return true, ""
 	}
 	return false, cmp.Or(signalReasons[typ], notAudited)

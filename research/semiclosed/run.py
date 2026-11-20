@@ -290,9 +290,9 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         raise ValueError("serving.coefficients must be distinct")
     layout = Layout.parse(serving["cluster"])
     engine, acceptance = parse_engine(serving["engine"], serving.get("acceptance"))
-    router_config, router_source = None, None
+    router_config, router_source, epp_flags = None, None, None
     if "router" in serving:
-        router = object_fields(serving["router"], {"endpoint_picker_config"},
+        router = object_fields(serving["router"], {"endpoint_picker_config", "epp_flags"},
                                {"endpoint_picker_config"}, "serving.router")
         router_source = path_from(router["endpoint_picker_config"], config.parent,
                                   "serving.router.endpoint_picker_config")
@@ -301,6 +301,10 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         router_config = router_source.read_text()
         if not router_config.strip():
             raise ValueError("serving.router.endpoint_picker_config must not be empty")
+        if "epp_flags" in router:  # the scenario's router.epp_flags, verbatim (they replace BLIS's defaults)
+            epp_flags = router["epp_flags"]
+            if not isinstance(epp_flags, list) or not all(isinstance(f, str) and f for f in epp_flags):
+                raise ValueError("serving.router.epp_flags must be a list of non-empty strings")
     run = object_fields(raw.get("run", {}), {"seed", "join_policy", "series_interval_s", "arrivals"}, set(), "run")
     seed = typed(run.get("seed", 42), int, "run.seed")
     if not -(2**63) <= seed < 2**63:
@@ -354,6 +358,8 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
                      "enable_expert_parallel": layout.enable_expert_parallel}, "engine": engine}]}
     if router_config is not None:
         deployment["router"] = {"endpoint_picker_config": "router.yaml"}
+        if epp_flags is not None:
+            deployment["router"]["epp_flags"] = epp_flags
     scenario_text = json_text(scenario) + "---\n" + json_text(deployment)
     input_path = output / "input"
     if sources:
@@ -414,6 +420,8 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         resolved["serving"]["router"] = {
             "endpoint_picker_config": str(router_source), "saved_config": str(output / "router.yaml"),
             "sha256": hashlib.sha256(router_config.encode()).hexdigest()}
+        if epp_flags is not None:
+            resolved["serving"]["router"]["epp_flags"] = epp_flags
     commands = (tuple(conversion), ("go", "build", "-o", str(output / "blis"), "."),
                 tuple(replay), tuple(verify))
     return RunPlan(output, resolved, original, scenario_text, commands, router_config)

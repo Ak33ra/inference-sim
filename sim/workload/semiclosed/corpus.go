@@ -42,6 +42,7 @@ type Corpus struct {
 
 type family struct {
 	id       string
+	sloClass string // research: objective sent with each of the family's requests
 	originMs int64
 	root     int
 	sessions []int

@@ -1,0 +1,12 @@
+--- a/pkg/embed/support.go
++++ b/pkg/embed/support.go
+@@ -45,6 +45,9 @@
+ 	// profile handlers and pickers
+ 	"single-profile-handler": true,
+ 	"disagg-profile-handler": true,
++	// research (inference-sim research/writeups/three-tier-routing): a pure header lookup, with no
++	// clock, randomness or background work on its decision path
++	"header-profile-handler": true,
+ 	"max-score-picker":       true,
+ 	"random-picker":          true,
+ 	"weighted-random-picker": true,

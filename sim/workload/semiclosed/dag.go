@@ -21,6 +21,8 @@ type dagTrace struct {
 	HashIDScope string    `json:"hash_id_scope"`
 	Models      []string  `json:"models"`
 	Requests    []dagCall `json:"requests"`
+	// SLOClass (research, optional) is sent with every request of the family as its objective.
+	SLOClass string `json:"slo_class"`
 }
 
 type dagCall struct {
@@ -119,7 +121,7 @@ func readDAG(reader io.Reader) (*Corpus, error) {
 }
 
 func (c *Corpus) addDAGFamily(tr dagTrace, nextToken *int64) error {
-	f := family{id: tr.ID, root: len(c.sessions)}
+	f := family{id: tr.ID, root: len(c.sessions), sloClass: tr.SLOClass}
 	first := len(c.requests)
 	byID := make(map[int]int)
 	parents := make(map[int][]int)

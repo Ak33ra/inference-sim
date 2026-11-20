@@ -123,7 +123,8 @@ func (x *Replay) schedule(i int, due int64) *sim.Request {
 	r := x.corpus.requests[i]
 	s := &x.states[i]
 	s.state, s.arrivalUs = Scheduled, due
-	s.request = &sim.Request{ID: r.id, ArrivalTime: due}
+	s.request = &sim.Request{ID: r.id, ArrivalTime: due,
+		SLOClass: x.corpus.families[x.corpus.sessions[r.session].family].sloClass}
 	return s.request
 }
 

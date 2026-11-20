@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -323,8 +324,12 @@ const roleLabel = "llm-d.ai/role"
 // the extra labels: an unscoped key=value on every pod, a role:key=value on the pods of that role,
 // where it overrides an unscoped label with the same key.
 func podLabelFunc(extra map[string]string) func(cluster.InstanceID, cluster.PoolRole) map[string]string {
-	return func(_ cluster.InstanceID, role cluster.PoolRole) map[string]string {
+	perInstance := researchInstanceLabels()
+	return func(id cluster.InstanceID, role cluster.PoolRole) map[string]string {
 		labels := map[string]string{}
+		for k, v := range perInstance[string(id)] {
+			labels[k] = v
+		}
 		for k, v := range extra {
 			if !strings.Contains(k, ":") {
 				labels[k] = v
@@ -351,6 +356,22 @@ func podLabelFunc(extra map[string]string) func(cluster.InstanceID, cluster.Pool
 		}
 		return labels
 	}
+}
+
+// researchInstanceLabels reads BLIS_RESEARCH_INSTANCE_LABELS, a JSON object mapping an instance
+// id (instance_0, ...) to extra pod labels. Research-only (research/writeups/three-tier-routing):
+// pool labels apply per role, and this labels individual servers, e.g. to reserve some of them.
+func researchInstanceLabels() map[string]map[string]string {
+	raw := os.Getenv("BLIS_RESEARCH_INSTANCE_LABELS")
+	if raw == "" {
+		return nil
+	}
+	var out map[string]map[string]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		logrus.Fatalf("BLIS_RESEARCH_INSTANCE_LABELS: %v", err)
+	}
+	logrus.Warnf("research: per-instance pod labels from BLIS_RESEARCH_INSTANCE_LABELS: %s", raw)
+	return out
 }
 
 // routerLogger routes the router's logs to stderr at BLIS's debug and trace levels; stdout
