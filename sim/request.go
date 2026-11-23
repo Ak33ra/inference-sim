@@ -54,7 +54,8 @@ const (
 func (p Phase) Measured() bool { return p != PhaseWarmup }
 
 type Request struct {
-	ID string // Unique identifier for the request
+	ProgramID ProgramID
+	ID        string // Unique identifier for the request
 
 	InputTokens  []TokenID // Prompt tokens
 	OutputTokens []TokenID // Pre-specified output tokens (already known for the simulation)

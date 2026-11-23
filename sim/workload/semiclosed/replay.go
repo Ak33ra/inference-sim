@@ -243,6 +243,7 @@ func (x *Replay) Gate(req *sim.Request, now int64) (bool, []*sim.Request) {
 	explicitOutputBudget := max(1, r.output)
 	req.MaxOutputLen = explicitOutputBudget
 	req.Model, req.Streaming, req.RoundIndex = r.model, r.stream, r.step
+	req.ProgramID = sim.ProgramID(x.corpus.families[x.corpus.sessions[r.session].family].id)
 	req.SessionID = x.corpus.families[x.corpus.sessions[r.session].family].id + "/" + x.corpus.sessions[r.session].id
 	req.State = sim.StateQueued
 	s.state, s.sent = Issued, true

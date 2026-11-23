@@ -17,6 +17,13 @@ type KVStore interface {
 	MirrorToCPU(batch []*Request) // Copy newly-completed full blocks to CPU tier. No-op for single-tier.
 }
 
+// DeferredKVRegistration keeps a scheduling pass's new prefix hashes private
+// until its final executable batch is known. Released allocations are discarded.
+type DeferredKVRegistration interface {
+	AllocateKVBlocksDeferred(req *Request, start, end int64, cached []int64) bool
+	CommitKVBlocks(req *Request, computed int64)
+}
+
 // ThrashCounts are the numerator and denominator of a KV store's KVThrashingRate. The
 // counts, not the rate, aggregate across instances (#1904).
 type ThrashCounts struct {

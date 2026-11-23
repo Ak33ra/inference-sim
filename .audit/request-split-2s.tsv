@@ -1,0 +1,6 @@
+decision	reason	evidence	result
+reuse frozen implementation and calibration	isolate the arrival-rate change	verified 4s study binary, shape oracle and references	accepted
+separate derived driver	old runner hardcodes 4s parity	common.spec and verify_run	no frozen-helper edits
+freeze reviewed derived driver	bind new condition and hashes without changing parent helpers	Sol signoff SHA49a2055; initial configuration-only setup retained	completed before any native run
+pilot accepted	verify real native path before full matrix	seed42 JSQ and SPLIT fully verified, exact paired root schedules	launched remaining eight runs
+accept full measured result	completed ten native runs and independent checks	120 statistics,60 paired changes,all60551edges andexacttokens	mean family SPLIT+0.84% versusJSQ,range+0.83to+0.95%

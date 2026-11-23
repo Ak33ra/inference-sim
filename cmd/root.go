@@ -850,6 +850,7 @@ func batchConfigFromCLI() sim.BatchConfig {
 // on the given command. Called by both runCmd and replayCmd to avoid
 // duplicating ~50 flag registrations.
 func registerSimConfigFlags(cmd *cobra.Command) {
+	registerResearchSchedulerFlags(cmd)
 	cmd.Flags().Int64Var(&seed, "seed", 42, "Seed for random request generation")
 	cmd.Flags().Int64Var(&simulationHorizon, "horizon", math.MaxInt64, "Total simulation horizon (in ticks)")
 	cmd.Flags().StringVar(&logLevel, "log", "warn", "Log level for diagnostic messages (trace, debug, info, warn, error, fatal, panic). Simulation results always print to stdout regardless of this setting.")
@@ -1638,6 +1639,7 @@ var runCmd = &cobra.Command{
 				// paths agree for every config both support (INV-13).
 				ModelHardwareConfig:  sim.NewModelHardwareConfig(lr.ModelConfig, model, gpu, tensorParallelism, dpPlan.PerRankDP, enableExpertParallel, maxModelLen),
 				PolicyConfig:         sim.NewPolicyConfig(scheduler, preemptionPolicy),
+				ResearchScheduler:    researchSchedulerRuntime(cmd),
 				LoRAConfig:           loraCfg,
 				SpeculativeConfig:    resolveSpeculativeConfig(cmd),
 				Frontend:             frontendConfigFromCLI(),

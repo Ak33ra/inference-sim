@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "trace": {
+    "model": "glm-5.2",
+    "weeks": 9,
+    "start_ms": 1784081087725,
+    "end_ms": 1784086819492
+  },
+  "serving": {
+    "model": "glm-5.2-fp8",
+    "cluster": {
+      "hardware": "b200",
+      "fabric": "ib-400g",
+      "gpus_per_node": 8,
+      "tp": 8,
+      "replicas": 2
+    },
+    "engine": {
+      "quantization": "fp8",
+      "cache_dtype": "fp8",
+      "block_size": 64,
+      "max_num_batched_tokens": 8192,
+      "max_num_seqs": 32,
+      "max_model_len": 1048576,
+      "cudagraph_mode": "PIECEWISE",
+      "gpu_memory_utilization": 0.9,
+      "enable_prefix_caching": true
+    }
+  },
+  "run": {
+    "seed": 42,
+    "join_policy": "timing-inferred",
+    "series_interval_s": 0
+  },
+  "output": "../../outputs/semiclosed/glm52-config-smoke"
+}

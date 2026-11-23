@@ -1,0 +1,7 @@
+decision	reason	evidence	result
+accepted semantics	user clarification	shared queue; seven shortest and one longest; isolated BLIS request time	implement
+shared central core	avoid duplicate native lifecycle while retaining typed policy identities	Astra candidate plus Sol cross-judge	accepted
+serial semi-closed oracle	client completion, exact native token costs	10 CLI probes exact chain/reverse/singleton parity	accepted
+native implementation complete	shared lifecycle preserves session behavior	15 reviewed files; exact legacy seed42 parity; affected Go and 75 Python tests	passed
+move new outputs to scratch	home quota interrupted four control artifact writes	374 migration files verified; original path retained via symlink	retried four controls successfully
+accept measured regression	all five mean family/session comparisons increase	120 independently checked statistics and 60 paired changes	mean family +2.11%; mean session +2.17%

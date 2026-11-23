@@ -188,6 +188,7 @@ func (m *Model) sequenceState(b KVBudget) sim.KVSequenceState {
 	per := b.PerBlockBytes
 	blocks := func(bytes int64) int64 { return (bytes + per - 1) / per }
 	return sim.KVSequenceState{
+		LifecyclePeak: func(tokens int64) int64 { return blocks(k.SequenceBoundedBytesAt(0, int(tokens))) },
 		Hold: func(computed, inFlight int64) int64 {
 			return blocks(k.SequenceBoundedBytesAt(int(computed), int(inFlight)))
 		},

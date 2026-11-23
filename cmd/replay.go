@@ -71,6 +71,9 @@ Example:
 		}
 		logrus.SetLevel(level)
 		validateRouterFlags()
+		if researchRouter == "" && (researchRouterConfig != "" || researchRouterDecisions != "") {
+			logrus.Fatalf("--research-router-config and --research-router-decisions require --research-router")
+		}
 		if err := validateSemiClosedFlags(cmd); err != nil {
 			logrus.Fatalf("%v", err)
 		}
@@ -521,6 +524,7 @@ Example:
 				// (cmd/root.go), from the same shared resolveDPPlacement (INV-13).
 				ModelHardwareConfig:  sim.NewModelHardwareConfig(lr.ModelConfig, model, gpu, tensorParallelism, dpPlan.PerRankDP, enableExpertParallel, maxModelLen),
 				PolicyConfig:         sim.NewPolicyConfig(scheduler, preemptionPolicy),
+				ResearchScheduler:    researchSchedulerRuntime(cmd),
 				LoRAConfig:           loraCfg,
 				SpeculativeConfig:    resolveSpeculativeConfig(cmd),
 				Frontend:             frontendConfigFromCLI(),
@@ -602,10 +606,25 @@ Example:
 				return followUps
 			}
 		}
+		if researchRouter == cluster.PolicySessionSplit || researchRouter == cluster.PolicyRequestSplit {
+			if semiClosed == nil || cmd.Flags().Changed("horizon") {
+				logrus.Fatalf("%s requires complete-drain semi-closed replay without --horizon", researchRouter)
+			}
+			validate := cluster.ValidateSessionSplitDeployment
+			if researchRouter == cluster.PolicyRequestSplit {
+				validate = cluster.ValidateRequestSplitDeployment
+			}
+			if err := validate(config); err != nil {
+				logrus.Fatalf("%v", err)
+			}
+		}
 		cs = cluster.NewClusterSimulator(config, cluster.NewSliceRequestSource(requests), onRequestDone)
 		// INV-13: the router the trace was recorded with, unless the command line names one.
 		router := reconcileReplayRouter(cmd, traceData.Header.Router)
-		gw := newGateway(router, model)
+		gw, researchGW, err := newReplayGateway(router, model)
+		if err != nil {
+			logrus.Fatalf("research router: %v", err)
+		}
 		cs.SetGateway(gw)
 		if semiClosed != nil {
 			cs.SetArrivalGate(semiClosed.Gate)
@@ -625,6 +644,11 @@ Example:
 		}
 
 		runErr := cs.Run()
+		if researchGW != nil && researchRouterDecisions != "" {
+			if err := researchGW.WriteAudit(researchRouterDecisions); err != nil {
+				logrus.Fatalf("research router audit: %v", err)
+			}
+		}
 		var semiClosedErr error
 		if semiClosed != nil {
 			semiClosedErr = finishSemiClosedRun(semiClosed, cs.Clock(), cs.AggregatedMetrics(), runErr)
@@ -713,7 +737,7 @@ Example:
 		// An agentic replay (#1937) adds the measured window and its agentic block.
 		// P/D metrics (#1922/#1934/#1940): stdout's PD section and the file's pd block.
 		pdMetrics := cs.PDMetrics()
-		extra := append([]sim.EmitOption{sim.WithPD(pdMetrics.Output()), sim.WithServerSeries(cs.ServerSeries())}, agx.emitOptions(aggregated)...)
+		extra := append([]sim.EmitOption{sim.WithPD(pdMetrics.Output()), sim.WithServerSeries(cs.ServerSeries()), sim.WithResearchScheduler(config.ResearchScheduler)}, agx.emitOptions(aggregated)...)
 		if err := aggregated.EmitOutput(clusterOutput, replayMetricsPath,
 			append(resultsFileEmitOptions(replayMetricsPath, resolvedCatalogRoot), extra...)...); err != nil {
 			logrus.Fatalf("SaveResults: %v", err)
@@ -876,7 +900,7 @@ Example:
 				// forward keeps it available to a downstream calibrate and never
 				// silently drops it.
 				ObservedKVMetrics: traceData.Header.ObservedKVMetrics,
-				Router:            router.header(gw.Seed()),
+				Router:            router.header(replayGatewaySeed(router)),
 			}
 			if err := workload.ExportTraceV2(header, records, replayTraceOutput+".yaml", replayTraceOutput+".csv"); err != nil {
 				logrus.Fatalf("Trace export failed: %v", err)
@@ -898,6 +922,9 @@ func init() {
 	replayCmd.Flags().StringVar(&resultsPath, "results-path", "", "File to write []SimResult JSON (request_id, ttft_us, e2e_us, input_tokens, output_tokens, slo_class, model, itl_mean_us) for blis calibrate consumption.")
 	replayCmd.Flags().StringVar(&replayTraceOutput, "trace-output", "", "Export replay results as TraceV2 files (<prefix>.yaml + <prefix>.csv); header mode is \"replayed\". Under --session-mode fixed-accumulate the export records reconstructed ABSOLUTE per-round inputs (no session_context_growth header) — re-replay it with --session-mode fixed, not fixed-accumulate.")
 	replayCmd.Flags().StringVar(&replayMetricsPath, "metrics-path", "", "File to write aggregate MetricsOutput JSON (incl. cache_hit_rate for 'blis calibrate --sim-metrics', #1583). Symmetric with 'blis run --metrics-path'; stdout is unaffected.")
+	replayCmd.Flags().StringVar(&researchRouter, "research-router", "", "Research-only router: jsq, least-token, random, agentix, preble-e2, session-reservation, session-split, or request-split; empty preserves the llm-d default.")
+	replayCmd.Flags().StringVar(&researchRouterConfig, "research-router-config", "", "Strict JSON parameters for --research-router (latency_us, cache_event_delay_us, history_window_s, prefill_us_per_token, decode_us_per_token, initial_output_tokens, session_class_manifest, reserved_instances, remaining_manifest, service_manifest).")
+	replayCmd.Flags().StringVar(&researchRouterDecisions, "research-router-decisions", "", "Write the research router's decision and cache-event audit JSON; requires --research-router.")
 
 	// Saturation trace flags (#1516): --detectors + --saturation-config + --saturation-report.
 	registerDetectorFlags(replayCmd)

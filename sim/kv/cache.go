@@ -38,20 +38,25 @@ type KVBlock struct {
 // via a direct counter on the free list (FreeBlockCnt), mirroring vLLM's
 // FreeKVCacheBlockQueue.num_free_blocks.
 type KVCacheState struct {
-	TotalBlocks     int64              // Total KV blocks available on GPU
-	BlockSizeTokens int64              // Tokens per block
-	Blocks          []*KVBlock         // All KV blocks
-	RequestMap      map[string][]int64 // RequestID -> block sequence
-	HashToBlock     map[string]int64   // Hash -> block ID
-	FreeHead        *KVBlock           // Head of free list
-	FreeTail        *KVBlock           // Tail of free list
-	FreeBlockCnt    int64              // Direct count of blocks in free list (vLLM parity)
-	CacheHits       int64              // blocks found via prefix cache (PR12)
-	CacheMisses     int64              // blocks not found, allocated fresh (PR12)
+	lifecycleRefusals int64
+	lifecyclePeak     int64
+	lifecycle         map[string]int64
+	lifecycleTotal    int64
+	TotalBlocks       int64              // Total KV blocks available on GPU
+	BlockSizeTokens   int64              // Tokens per block
+	Blocks            []*KVBlock         // All KV blocks
+	RequestMap        map[string][]int64 // RequestID -> block sequence
+	HashToBlock       map[string]int64   // Hash -> block ID
+	FreeHead          *KVBlock           // Head of free list
+	FreeTail          *KVBlock           // Tail of free list
+	FreeBlockCnt      int64              // Direct count of blocks in free list (vLLM parity)
+	CacheHits         int64              // blocks found via prefix cache (PR12)
+	CacheMisses       int64              // blocks not found, allocated fresh (PR12)
 	// remoteKV are the requests whose blocks a remote pull is still filling
 	// (AllocateRemoteKV): their full blocks carry hashes but are not registered in
 	// HashToBlock until CacheRemoteKV, so no other request hits on KV not yet present.
-	remoteKV map[string]bool
+	remoteKV     map[string]bool
+	deferredFrom map[string]int
 
 	// SequenceState sizes each request's bounded per-sequence state -- window rings,
 	// compressor and indexer state, bounded recurrent state -- as the latency kernel prices it
@@ -242,6 +247,9 @@ func (kvc *KVCacheState) chainOf(tokens []sim.TokenID) []string {
 // start and endIndex are by original requests' index
 // endIndex is non-inclusive
 func (kvc *KVCacheState) AllocateKVBlocks(req *sim.Request, startIndex int64, endIndex int64, cachedBlocks []int64) bool {
+	if kvc.lifecycle != nil {
+		return kvc.allocateLifecycle(req, startIndex, endIndex, cachedBlocks)
+	}
 	return kvc.allocate(req, startIndex, startIndex, endIndex, cachedBlocks)
 }
 
@@ -757,6 +765,10 @@ func (kvc *KVCacheState) commitCachedBlocks(reqID string, cachedBlocks []int64) 
 // ReleaseKVBlocks deallocates blocks used by a completed request.
 // Each block's refcount is decremented and may be returned to the free list.
 func (kvc *KVCacheState) ReleaseKVBlocks(req *sim.Request) {
+	if kvc.lifecycle != nil {
+		kvc.lifecycleTotal -= kvc.lifecycle[req.ID]
+		delete(kvc.lifecycle, req.ID)
+	}
 	// The bounded-state and spare blocks hold nothing reusable, so they are freed first
 	// and are the first of this request's blocks to be reused.
 	for _, blank := range []map[string][]int64{kvc.StateBlocks, kvc.SpareBlocks} {
@@ -771,6 +783,7 @@ func (kvc *KVCacheState) ReleaseKVBlocks(req *sim.Request) {
 	ids := kvc.RequestMap[req.ID]
 	delete(kvc.RequestMap, req.ID)
 	delete(kvc.remoteKV, req.ID)
+	delete(kvc.deferredFrom, req.ID)
 	delete(kvc.pending, req.ID)
 	// From https://docs.vllm.ai/en/v0.8.5/design/v1/prefix_caching.html
 	// Freed blocks are added to the tail of the free queue in reverse order.
@@ -869,6 +882,37 @@ func (kvc *KVCacheState) AllocateRemoteKV(req *sim.Request, startIndex, endIndex
 	return true
 }
 
+func (kvc *KVCacheState) AllocateKVBlocksDeferred(req *sim.Request, start, end int64, cached []int64) bool {
+	ids := kvc.RequestMap[req.ID]
+	first := len(ids)
+	if first == 0 {
+		first = len(cached)
+	} else if int64(len(kvc.Blocks[ids[first-1]].Tokens)) < kvc.BlockSizeTokens {
+		first--
+	}
+	if !kvc.AllocateRemoteKV(req, start, end, cached) {
+		delete(kvc.deferredFrom, req.ID)
+		return false
+	}
+	if kvc.deferredFrom == nil {
+		kvc.deferredFrom = make(map[string]int)
+	}
+	if earlier, ok := kvc.deferredFrom[req.ID]; ok {
+		first = min(first, earlier)
+	}
+	kvc.deferredFrom[req.ID] = first
+	return true
+}
+
+func (kvc *KVCacheState) CommitKVBlocks(req *sim.Request, computed int64) {
+	if first, ok := kvc.deferredFrom[req.ID]; ok {
+		delete(kvc.deferredFrom, req.ID)
+		delete(kvc.remoteKV, req.ID)
+		kvc.cacheRequestBlocks(req.ID, first)
+	}
+	kvc.registerTails(req, computed)
+}
+
 // CacheRemoteKV implements sim.RemoteKVReserver: the pull has landed, so register the
 // request's full blocks in the prefix cache (vLLM's cache_blocks). A hash another block
 // already registered keeps that block.
@@ -877,8 +921,16 @@ func (kvc *KVCacheState) CacheRemoteKV(reqID string) {
 		return
 	}
 	delete(kvc.remoteKV, reqID)
+	kvc.cacheRequestBlocks(reqID, 0)
+}
+
+func (kvc *KVCacheState) cacheRequestBlocks(reqID string, first int) {
+	ids := kvc.RequestMap[reqID]
 	parent := ""
-	for _, id := range kvc.RequestMap[reqID] {
+	if first > 0 {
+		parent = kvc.Blocks[ids[first-1]].Hash
+	}
+	for _, id := range ids[first:] {
 		blk := kvc.Blocks[id]
 		h := blk.Hash
 		if h == "" {
