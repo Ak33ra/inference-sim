@@ -1,7 +1,25 @@
 # Agent fan-out makespan research
 
-Research context and next steps from the discussion through **2026-10-30**.
-This document distinguishes measured trace statistics, simulator checks, and planned work.
+## Current direction (2026-11-23)
+
+For fan-out and makespan comparisons, use the [three-tier routing cohort](research/writeups/three-tier-routing/README.md#setup)
+of 164 Commit0 and 25 Oolong families. Exclude SWE-bench by default because it
+has little parallel fan-out in this trace. Of the 98 SWE-bench families, 86
+have no subagent session, 11 spawn at most one child session per root request,
+and one reaches two child sessions from the same root request.
+
+The next question is whether request-level latency captures the cost of waiting
+for siblings. Consider two families, each with two unit-time requests ready at
+time zero, on two replicas that serve one request at a time. Both schedules
+produce request completion times of 1, 1, 2, 2. Serving siblings together
+finishes the families at 1 and 2 (mean 1.5). Serving one request from each
+family in each round finishes both at 2 (mean 2). The same request latency
+distribution can therefore hide a different mean family makespan. For trace
+evidence, pair request latency with spawn-to-last-child time and family
+makespan on the same arrivals. The [earlier fork study](research/writeups/mega-policy-study/forks.md)
+defines the fork metric and reports results on the full mega trace.
+
+The historical notes below cover the work through 2026-10-30.
 
 ## Objective and current status
 

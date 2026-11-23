@@ -231,6 +231,10 @@ spreads load evenly, at 9.8–12.5 per server depending on the seed.
 
 ## Setup
 
+Fan-out comparisons use the 189-family Commit0 + Oolong cohort. We exclude the
+98 SWE-bench families in the full mega trace because they have little parallel
+fan-out. See the [cohort counts and makespan motivation](../../../MAKESPAN_RESEARCH.md#current-direction-2026-11-23).
+
 | Item | Value |
 | --- | --- |
 | Workload | Every family in optrouting's commit0 and Oolong sets (`traces/commit0-fanout-buckets/`, `natural-oolong-fanout.jsonl.zst`), each run exactly once. The 189 families are concatenated, commit0 first, and shuffled per seed with `random.Random(seed)`. |
