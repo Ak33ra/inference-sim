@@ -10,3 +10,6 @@
  	"max-score-picker":       true,
  	"random-picker":          true,
  	"weighted-random-picker": true,
+@@ -68,0 +72,2 @@
++	// research: a pure comparison of one request header with immutable endpoint labels
++	"header-label-affinity-scorer": true,

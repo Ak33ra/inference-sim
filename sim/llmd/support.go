@@ -135,10 +135,12 @@ func allow(typ string) (bool, string) {
 	if supported[typ] {
 		return true, ""
 	}
-	// Research (research/writeups/three-tier-routing): semi-closed DAG families may carry a
-	// slo_class, sent as the objective header this handler selects a profile by. Opt-in, since
-	// the stock fork refuses the type; that writeup's setup builds against a patched fork.
-	if typ == "header-profile-handler" && os.Getenv("BLIS_RESEARCH_ALLOW_HEADER_PROFILE") == "1" {
+	// Research (research/writeups/three-tier-routing): semi-closed DAG requests may carry a
+	// causal class in the objective header. The profile handler selects the tier and the affinity
+	// scorer implements the soft-reservation ablation. Both are pure functions of that header and
+	// pod labels. Opt-in, since the stock fork refuses them; the setup builds a patched fork.
+	if (typ == "header-profile-handler" || typ == "header-label-affinity-scorer") &&
+		os.Getenv("BLIS_RESEARCH_ALLOW_HEADER_PROFILE") == "1" {
 		return true, ""
 	}
 	return false, cmp.Or(signalReasons[typ], notAudited)

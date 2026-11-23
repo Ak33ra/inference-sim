@@ -81,7 +81,7 @@ def trace(work, lines, seed, tiered):
     return path
 
 
-def run_one(work, router, path, seed):
+def run_one(work, router, path, seed, rate):
     out = work / "runs" / f"{router}-s{seed}"
     if not (out / "workload.json").exists():
         tiered = router != "jsq"
@@ -91,7 +91,7 @@ def run_one(work, router, path, seed):
         c["serving"]["cluster"]["replicas"] = GPUS
         assert c["serving"]["engine"]["enable_prefix_caching"] is False
         c["run"]["seed"] = seed
-        c["run"]["arrivals"] = {"mode": "poisson", "rate_per_s": RATE, "seed": seed}
+        c["run"]["arrivals"] = {"mode": "poisson", "rate_per_s": rate, "seed": seed}
         env = {k: v for k, v in os.environ.items()
                if k not in ("BLIS_RESEARCH_INSTANCE_LABELS", "BLIS_RESEARCH_ALLOW_HEADER_PROFILE")}
         if tiered:
@@ -143,7 +143,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", type=pathlib.Path, default=REPO / "research/outputs/three-tier-routing")
     p.add_argument("--jobs", type=int, default=10, help="parallel BLIS runs (each needs a few GB of RAM)")
+    p.add_argument("--rate", type=float, default=RATE,
+                   help=f"Poisson root-family rate/s (default: recorded result, {RATE})")
     a = p.parse_args()
+    if not math.isfinite(a.rate) or a.rate <= 0:
+        p.error("--rate must be finite and positive")
     for v in ("BLIS_CATALOG", "BLIS_REGISTRY", "GOWORK"):
         if not os.environ.get(v):
             sys.exit(f"{v} is not set; run replicate.sh")
@@ -151,7 +155,7 @@ def main():
     lines = load_families(work)
     jobs = [(router, seed, trace(work, lines, seed, router != "jsq")) for router in ROUTERS for seed in SEEDS]
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        outs = list(ex.map(lambda j: run_one(work, j[0], j[2], j[1]), jobs))
+        outs = list(ex.map(lambda j: run_one(work, j[0], j[2], j[1], a.rate), jobs))
     results, ok, all_rows = {}, True, []
     for (router, seed, _), out in zip(jobs, outs):
         rows, checks = analyse(out, seed)
@@ -162,10 +166,14 @@ def main():
         kept = [r for r in all_rows if r["router"] == router and r["kept"]]
         res["pooled"] = stats(r["slowdown"] for r in kept)
         res["by_class"] = {c: stats(r["slowdown"] for r in kept if r["class"] == c) for c in ("P1", "P2", "P3")}
-        exp = EXPECTED[router]
-        match = all(math.isclose(res["pooled"][k], exp[k], rel_tol=1e-12) for k in ("median", "mean", "p99")) and \
-            all(math.isclose(res["per_seed"][s]["mean"], exp["per_seed_mean"][s], rel_tol=1e-12) for s in SEEDS)
-        res["matches_recorded"] = match; ok &= match
+        res["rate_per_s"] = a.rate
+        if a.rate == RATE:
+            exp = EXPECTED[router]
+            match = all(math.isclose(res["pooled"][k], exp[k], rel_tol=1e-12) for k in ("median", "mean", "p99")) and \
+                all(math.isclose(res["per_seed"][s]["mean"], exp["per_seed_mean"][s], rel_tol=1e-12) for s in SEEDS)
+            res["matches_recorded"] = match; ok &= match
+        else:
+            res["matches_recorded"] = None
     if results["tier-40-60"]["per_seed"] and any(results["tier-40-60"]["per_seed"][s]["violations"] for s in SEEDS):
         ok = False
     a.out.mkdir(parents=True, exist_ok=True)
@@ -188,7 +196,10 @@ def main():
               f"({pc(t['per_seed'][s]['mean'], j['per_seed'][s]['mean'])}); active per server "
               f"p1 {a_['p1']:.1f} / p12 {a_['p12']:.1f} / shared {a_['shared']:.1f}; "
               f"violations {t['per_seed'][s]['violations']}")
-    print("REPLICATED: matches the recorded result" if ok else "MISMATCH: see results.json")
+    if a.rate == RATE:
+        print("REPLICATED: matches the recorded result" if ok else "MISMATCH: see results.json")
+    else:
+        print(f"CUSTOM RATE COMPLETE: {a.rate:.6f} families/s" if ok else "INVALID: see results.json")
     sys.exit(0 if ok else 1)
 
 

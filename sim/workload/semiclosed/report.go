@@ -18,6 +18,7 @@ type Report struct {
 	JoinPolicy          JoinPolicy            `json:"join_policy"`
 	JoinAssumption      string                `json:"join_assumption"`
 	Arrivals            ArrivalConfig         `json:"arrivals"`
+	CausalTiers         *CausalTierConfig     `json:"causal_tiers,omitempty"`
 	Complete            bool                  `json:"complete"`
 	AccountingMatch     bool                  `json:"accounting_match"`
 	Source              json.RawMessage       `json:"source"`
@@ -42,6 +43,7 @@ type FamilyReport struct {
 	CompletionUs *int64        `json:"completion_us"`
 	MakespanUs   *int64        `json:"makespan_us"`
 	States       map[State]int `json:"states"`
+	ObservedWork int64         `json:"observed_work,omitempty"`
 }
 
 type SessionReport struct {
@@ -55,25 +57,29 @@ type SessionReport struct {
 }
 
 type RequestReport struct {
-	RequestID          string               `json:"request_id"`
-	TraceID            string               `json:"trace_id"`
-	SessionID          string               `json:"session_id"`
-	Step               int                  `json:"step"`
-	StartMs            int64                `json:"start_ms"`
-	EndMs              int64                `json:"end_ms"`
-	PromptTokens       int                  `json:"prompt_tokens"`
-	OutputTokens       int                  `json:"output_tokens"`
-	State              State                `json:"state"`
-	Reason             string               `json:"reason,omitempty"`
-	ArrivalUs          *int64               `json:"arrival_us"`
-	CompletionUs       *int64               `json:"completion_us"`
-	TerminalUs         *int64               `json:"terminal_us"`
-	TTFTUs             *float64             `json:"ttft_us"`
-	E2EUs              *int64               `json:"e2e_us"`
-	EngineE2EUs        *float64             `json:"engine_e2e_us"`
-	EngineCompletionUs *float64             `json:"engine_completion_us"`
-	DelayUs            int64                `json:"delay_us"`
-	Prerequisites      []PrerequisiteReport `json:"prerequisites"`
+	RequestID                  string               `json:"request_id"`
+	TraceID                    string               `json:"trace_id"`
+	SessionID                  string               `json:"session_id"`
+	Step                       int                  `json:"step"`
+	StartMs                    int64                `json:"start_ms"`
+	EndMs                      int64                `json:"end_ms"`
+	PromptTokens               int                  `json:"prompt_tokens"`
+	OutputTokens               int                  `json:"output_tokens"`
+	State                      State                `json:"state"`
+	Reason                     string               `json:"reason,omitempty"`
+	ArrivalUs                  *int64               `json:"arrival_us"`
+	CompletionUs               *int64               `json:"completion_us"`
+	TerminalUs                 *int64               `json:"terminal_us"`
+	TTFTUs                     *float64             `json:"ttft_us"`
+	E2EUs                      *int64               `json:"e2e_us"`
+	EngineE2EUs                *float64             `json:"engine_e2e_us"`
+	EngineCompletionUs         *float64             `json:"engine_completion_us"`
+	DelayUs                    int64                `json:"delay_us"`
+	Prerequisites              []PrerequisiteReport `json:"prerequisites"`
+	RoutingClass               string               `json:"routing_class,omitempty"`
+	ObservedWorkBefore         int64                `json:"observed_work_before,omitempty"`
+	ObservedWorkAfterAdmission int64                `json:"observed_work_after_admission,omitempty"`
+	CompletedOutputCharge      int64                `json:"completed_output_charge,omitempty"`
 }
 
 type PrerequisiteReport struct {
@@ -89,7 +95,7 @@ func (x *Replay) Summary() Report {
 		JoinAssumption: "join candidates are inferred from recorded timing, not observed causal barriers",
 		Source:         append(json.RawMessage(nil), c.manifest...), ManifestSHA256: c.manifestSHA256,
 		OriginMs: c.originMs, EndUs: x.endUs, Selected: c.totals, Engine: x.engine, EngineAvailable: x.engineAvailable,
-		States: make(map[State]int), SourceTokensByState: make(map[State]TokenTotals)}
+		States: make(map[State]int), SourceTokensByState: make(map[State]TokenTotals), CausalTiers: x.causalTiers}
 	r.Arrivals = x.arrivals
 	if x.policy == ExplicitDAG {
 		r.JoinAssumption = "explicit parent_ids are completion prerequisites; delays are recorded gaps after the latest parent completion"
@@ -108,7 +114,9 @@ func (x *Replay) Summary() Report {
 		session := c.sessions[req.session]
 		rr := RequestReport{RequestID: req.id, TraceID: c.families[session.family].id, SessionID: session.id, Step: req.step,
 			StartMs: req.startMs, EndMs: req.endMs, PromptTokens: req.prompt, OutputTokens: req.output, State: s.state, Reason: s.reason,
-			DelayUs: x.deps[i].delayUs, Prerequisites: []PrerequisiteReport{}}
+			DelayUs: x.deps[i].delayUs, Prerequisites: []PrerequisiteReport{}, RoutingClass: s.tierClass,
+			ObservedWorkBefore: s.observedWorkBefore, ObservedWorkAfterAdmission: s.observedWorkAfterAdmission,
+			CompletedOutputCharge: s.completedOutputCharge}
 		if s.sent {
 			rr.ArrivalUs = pointer(s.arrivalUs)
 		}
@@ -159,7 +167,8 @@ func (x *Replay) Summary() Report {
 		r.Sessions = append(r.Sessions, sr)
 	}
 	for fi, f := range c.families {
-		fr := FamilyReport{TraceID: f.id, OriginMs: f.originMs, BirthUs: x.birthUs[fi], States: make(map[State]int)}
+		fr := FamilyReport{TraceID: f.id, OriginMs: f.originMs, BirthUs: x.birthUs[fi], States: make(map[State]int),
+			ObservedWork: x.familyObservedWork[fi]}
 		complete, last := true, int64(0)
 		for _, si := range f.sessions {
 			for _, i := range c.sessions[si].requests {

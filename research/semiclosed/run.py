@@ -224,6 +224,21 @@ def parse_arrivals(value: object, seed: int) -> dict:
     return result
 
 
+def parse_causal_tiers(value: object) -> dict:
+    field = "run.causal_tiers"
+    value = object_fields(value, {"thresholds", "completed_output_weight"},
+                          {"thresholds"}, field)
+    thresholds = value["thresholds"]
+    if (not isinstance(thresholds, list) or len(thresholds) != 2
+            or any(type(item) is not int for item in thresholds)):
+        raise ValueError(f"{field}.thresholds must contain exactly two integers")
+    if thresholds[0] <= 0 or thresholds[1] <= thresholds[0]:
+        raise ValueError(f"{field}.thresholds must be positive and strictly increasing")
+    weight = positive(value.get("completed_output_weight", 64),
+                      f"{field}.completed_output_weight")
+    return {"thresholds": list(thresholds), "completed_output_weight": weight}
+
+
 def json_text(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
 
@@ -305,7 +320,9 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
             epp_flags = router["epp_flags"]
             if not isinstance(epp_flags, list) or not all(isinstance(f, str) and f for f in epp_flags):
                 raise ValueError("serving.router.epp_flags must be a list of non-empty strings")
-    run = object_fields(raw.get("run", {}), {"seed", "join_policy", "series_interval_s", "arrivals"}, set(), "run")
+    run = object_fields(raw.get("run", {}),
+                        {"seed", "join_policy", "series_interval_s", "arrivals", "causal_tiers"},
+                        set(), "run")
     seed = typed(run.get("seed", 42), int, "run.seed")
     if not -(2**63) <= seed < 2**63:
         raise ValueError("run.seed must fit a signed 64-bit integer")
@@ -313,6 +330,7 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
     if join not in (("explicit",) if trace_format == "weka-dag" else ("timing-inferred", "none")):
         raise ValueError("run.join_policy must be explicit for weka-dag, or timing-inferred/none for freeinference")
     arrivals = parse_arrivals(run.get("arrivals", {"mode": "trace"}), seed)
+    causal_tiers = parse_causal_tiers(run["causal_tiers"]) if "causal_tiers" in run else None
     if trace_format == "freeinference" and arrivals["mode"] != "trace":
         raise ValueError("config-generated arrivals currently require trace.format=weka-dag; FreeInference keeps recorded arrivals")
     series = typed(run.get("series_interval_s", 0), float, "run.series_interval_s")
@@ -392,6 +410,11 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
         for field, flag in (("interval_s", "--semi-closed-arrival-interval-s"), ("rate_per_s", "--semi-closed-arrival-rate")):
             if field in arrivals:
                 replay += [flag, str(arrivals[field])]
+    if causal_tiers:
+        replay += ["--semi-closed-causal-tier-thresholds",
+                   ",".join(map(str, causal_tiers["thresholds"])),
+                   "--semi-closed-completed-output-weight",
+                   str(causal_tiers["completed_output_weight"])]
     if acceptance:
         replay += ["--speculative-category", acceptance["category"], "--speculative-thinking", acceptance["thinking"]]
     verifier = "verify_dag.py" if trace_format == "weka-dag" else "verify.py"
@@ -414,7 +437,9 @@ def prepare(config: Path, *, output: Path | None = None, python: str | None = No
                 "capacity": {"allocated_gpus": layout.nodes * layout.gpus_per_node,
                              "active_gpus": layout.replicas * layout.tp,
                              "spare_gpus": layout.nodes * layout.gpus_per_node - layout.replicas * layout.tp},
-                "run": {"seed": seed, "join_policy": join, "series_interval_s": series, "arrivals": arrivals},
+                "run": {"seed": seed, "join_policy": join, "series_interval_s": series,
+                        "arrivals": arrivals,
+                        **({"causal_tiers": causal_tiers} if causal_tiers else {})},
                 "python_argv": python_argv, **{key: str(value) for key, value in paths.items()}}
     if router_config is not None:
         resolved["serving"]["router"] = {

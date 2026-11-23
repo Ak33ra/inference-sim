@@ -109,6 +109,27 @@ class ConfigRunTests(unittest.TestCase):
                     self.plan()
         self.assertFalse((self.root / "results/run").exists())
 
+    def test_causal_tiers_are_validated_and_forwarded(self):
+        source = self.root / "synthetic.jsonl"
+        source.write_text("{}")
+        self.config["trace"] = {"format": "weka-dag", "path": "../synthetic.jsonl"}
+        self.config["run"] = {"causal_tiers": {
+            "thresholds": [1_000_000, 3_000_000], "completed_output_weight": 32}}
+        plan = self.plan()
+        replay = plan.commands[2]
+        self.assertEqual(replay[replay.index("--semi-closed-causal-tier-thresholds") + 1],
+                         "1000000,3000000")
+        self.assertEqual(replay[replay.index("--semi-closed-completed-output-weight") + 1], "32")
+        self.assertEqual(plan.resolved["run"]["causal_tiers"], self.config["run"]["causal_tiers"])
+        for value in ({}, {"thresholds": [1]}, {"thresholds": [2, 1]},
+                      {"thresholds": [1, 2.0]},
+                      {"thresholds": [1, 2], "completed_output_weight": 0},
+                      {"thresholds": [1, 2], "future_output": True}):
+            with self.subTest(value=value):
+                self.config["run"]["causal_tiers"] = value
+                with self.assertRaisesRegex(ValueError, "causal_tiers"):
+                    self.plan()
+
     def test_mixed_dag_sources_resolve_without_changing_arrival_rate(self):
         source = self.root / "synthetic.jsonl"
         source.write_text("{}")

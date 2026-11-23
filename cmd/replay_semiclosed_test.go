@@ -23,8 +23,10 @@ func restoreSemiClosedFlags(t *testing.T) {
 	t.Helper()
 	input, report, join, session, metrics := semiClosedInput, semiClosedReport, semiClosedJoinPolicy, replaySessionMode, replayMetricsPath
 	arrivals := semiClosedArrivals
+	thresholds, outputWeight := semiClosedCausalTierThresholds, semiClosedCompletedOutputWeight
 	t.Cleanup(func() {
 		semiClosedArrivals = arrivals
+		semiClosedCausalTierThresholds, semiClosedCompletedOutputWeight = thresholds, outputWeight
 		semiClosedInput, semiClosedReport, semiClosedJoinPolicy, replaySessionMode, replayMetricsPath = input, report, join, session, metrics
 	})
 }

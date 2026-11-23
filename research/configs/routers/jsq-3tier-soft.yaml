@@ -1,0 +1,60 @@
+# Research: causal P1/P2/P3 classes with soft reservations. P1 uses ordinary JSQ over all eight
+# endpoints. P2 prefers the six endpoints labelled research.blis/soft-p2=P2 and P3 prefers the
+# four endpoints labelled research.blis/soft-p3=P3, but every endpoint remains eligible. The
+# affinity bonus is deliberately smaller than the JSQ score range, so enough load imbalance
+# overrides it. The experiment driver replaces both marked weights during the seed-42 sweep.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates: ["flowControl=false"]
+plugins:
+- type: token-producer
+- type: inflight-load-producer
+  parameters:
+    addEstimatedOutputTokens: false
+- type: active-request-scorer
+- type: max-score-picker
+- type: header-profile-handler
+  parameters:
+    headerName: x-llm-d-inference-objective
+    defaultProfile: P3
+- type: header-label-affinity-scorer
+  name: prefer-p2-home
+  parameters:
+    headerName: x-llm-d-inference-objective
+    labelKey: research.blis/soft-p2
+    stampResponseHeader: false
+- type: header-label-affinity-scorer
+  name: prefer-p3-home
+  parameters:
+    headerName: x-llm-d-inference-objective
+    labelKey: research.blis/soft-p3
+    stampResponseHeader: false
+- type: utilization-detector
+  name: pool-utilization
+- type: max-saturation-detector
+  name: pool-saturation
+  parameters:
+    detectors: [pool-utilization]
+flowControl:
+  saturationDetector:
+    pluginRef: pool-saturation
+schedulingProfiles:
+- name: P1
+  plugins:
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: max-score-picker
+- name: P2
+  plugins:
+  - pluginRef: prefer-p2-home
+    weight: 1 # SOFT_AFFINITY_WEIGHT
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: max-score-picker
+- name: P3
+  plugins:
+  - pluginRef: prefer-p3-home
+    weight: 1 # SOFT_AFFINITY_WEIGHT
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: max-score-picker

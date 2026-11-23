@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/inference-sim/inference-sim/sim"
 	"github.com/inference-sim/inference-sim/sim/workload/semiclosed"
@@ -12,10 +14,12 @@ import (
 )
 
 var (
-	semiClosedInput      string
-	semiClosedReport     string
-	semiClosedJoinPolicy string
-	semiClosedArrivals   semiclosed.ArrivalConfig
+	semiClosedInput                 string
+	semiClosedReport                string
+	semiClosedJoinPolicy            string
+	semiClosedArrivals              semiclosed.ArrivalConfig
+	semiClosedCausalTierThresholds  string
+	semiClosedCompletedOutputWeight int64
 )
 
 func registerSemiClosedReplayFlags(c *cobra.Command) {
@@ -26,11 +30,13 @@ func registerSemiClosedReplayFlags(c *cobra.Command) {
 	c.Flags().Float64Var(&semiClosedArrivals.IntervalS, "semi-closed-arrival-interval-s", 0, "With fixed arrivals: seconds between root families; zero starts all together")
 	c.Flags().Float64Var(&semiClosedArrivals.RatePerS, "semi-closed-arrival-rate", 0, "With poisson arrivals: root families per second")
 	c.Flags().Int64Var(&semiClosedArrivals.Seed, "semi-closed-arrival-seed", 42, "Independent RNG seed for root arrivals")
+	c.Flags().StringVar(&semiClosedCausalTierThresholds, "semi-closed-causal-tier-thresholds", "", "Research: two comma-separated observed-work thresholds for P1/P2/P3 family routing")
+	c.Flags().Int64Var(&semiClosedCompletedOutputWeight, "semi-closed-completed-output-weight", 64, "Research: observed-work charge per completion token, applied only after completion")
 }
 
 func validateSemiClosedFlags(c *cobra.Command) error {
 	if semiClosedInput == "" {
-		for _, flag := range []string{"semi-closed-report", "semi-closed-join-policy", "semi-closed-arrivals", "semi-closed-arrival-interval-s", "semi-closed-arrival-rate", "semi-closed-arrival-seed"} {
+		for _, flag := range []string{"semi-closed-report", "semi-closed-join-policy", "semi-closed-arrivals", "semi-closed-arrival-interval-s", "semi-closed-arrival-rate", "semi-closed-arrival-seed", "semi-closed-causal-tier-thresholds", "semi-closed-completed-output-weight"} {
 			if c.Flags().Changed(flag) {
 				return fmt.Errorf("--%s requires --semi-closed-input", flag)
 			}
@@ -42,6 +48,9 @@ func validateSemiClosedFlags(c *cobra.Command) error {
 	}
 	if err := semiClosedArrivals.Validate(); err != nil {
 		return err
+	}
+	if c.Flags().Changed("semi-closed-completed-output-weight") && semiClosedCausalTierThresholds == "" {
+		return fmt.Errorf("--semi-closed-completed-output-weight requires --semi-closed-causal-tier-thresholds")
 	}
 	if c.Flags().Changed("results-path") {
 		return fmt.Errorf("--results-path requires numeric TraceV2 request IDs; use --metrics-path for semi-closed per-request engine metrics")
@@ -99,7 +108,23 @@ func buildSemiClosedRun() (*semiclosed.Replay, error) {
 	if err != nil {
 		return nil, err
 	}
-	return semiclosed.NewReplay(corpus, semiclosed.Config{JoinPolicy: semiclosed.JoinPolicy(semiClosedJoinPolicy), Arrivals: semiClosedArrivals})
+	var causal *semiclosed.CausalTierConfig
+	if semiClosedCausalTierThresholds != "" {
+		parts := strings.Split(semiClosedCausalTierThresholds, ",")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("--semi-closed-causal-tier-thresholds requires exactly two comma-separated integers")
+		}
+		thresholds := make([]int64, 2)
+		for i, part := range parts {
+			value, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("--semi-closed-causal-tier-thresholds: %w", err)
+			}
+			thresholds[i] = value
+		}
+		causal = &semiclosed.CausalTierConfig{Thresholds: thresholds, CompletedOutputWeight: semiClosedCompletedOutputWeight}
+	}
+	return semiclosed.NewReplay(corpus, semiclosed.Config{JoinPolicy: semiclosed.JoinPolicy(semiClosedJoinPolicy), Arrivals: semiClosedArrivals, CausalTiers: causal})
 }
 
 func validateSemiClosedDeployment(x *semiclosed.Replay, prefill, decode, shared int) error {

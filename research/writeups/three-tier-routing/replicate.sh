@@ -23,10 +23,10 @@ if [[ -z "${BLIS_CATALOG:-}" || -z "${BLIS_REGISTRY:-}" ]]; then
   export BLIS_CATALOG=$deps/blis-catalog BLIS_REGISTRY=$deps/blis-registry
 fi
 
-# The fork release go.mod pins, plus one line: header-profile-handler in its audited plugin list.
+# The pinned fork plus two pure header plugins in its audited list (profile selection and soft affinity).
 version=$(cd "$repo" && go list -m -f '{{if .Replace}}{{.Replace.Version}}{{end}}' github.com/llm-d/llm-d-router)
 [[ $version == v1.0.0-blis.1 ]] || die "go.mod pins llm-d-router fork $version; the patch is for v1.0.0-blis.1"
-fork=$deps/llm-d-router-$version-header-profile
+fork=$deps/llm-d-router-$version-header-routing
 if [[ ! -f $fork/.patched ]]; then
   src=$(cd "$repo" && go mod download -json "github.com/inference-sim/llm-d-router@$version" |
         python3 -I -c 'import json,sys; print(json.load(sys.stdin)["Dir"])')

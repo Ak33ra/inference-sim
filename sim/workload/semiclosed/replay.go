@@ -24,37 +24,62 @@ const (
 type Config struct {
 	JoinPolicy JoinPolicy
 	Arrivals   ArrivalConfig
+	// CausalTiers is a research routing policy. It charges prompt tokens when a
+	// request is admitted and completion tokens only after the request finishes,
+	// then sends the request as P1, P2 or P3 according to the two thresholds.
+	CausalTiers *CausalTierConfig
+}
+
+type CausalTierConfig struct {
+	Thresholds            []int64 `json:"thresholds"`
+	CompletedOutputWeight int64   `json:"completed_output_weight"`
+}
+
+func (c CausalTierConfig) Validate() error {
+	if len(c.Thresholds) != 2 || c.Thresholds[0] <= 0 || c.Thresholds[1] <= c.Thresholds[0] {
+		return fmt.Errorf("causal tier thresholds must contain two positive, strictly increasing token counts")
+	}
+	if c.CompletedOutputWeight <= 0 {
+		return fmt.Errorf("causal completed-output weight must be positive")
+	}
+	return nil
 }
 
 type requestState struct {
-	state      State
-	request    *sim.Request
-	terminal   *sim.Request
-	outcome    State
-	arrivalUs  int64
-	terminalUs int64
-	sent       bool
-	reason     string
+	state                      State
+	request                    *sim.Request
+	terminal                   *sim.Request
+	outcome                    State
+	arrivalUs                  int64
+	terminalUs                 int64
+	sent                       bool
+	reason                     string
+	tierClass                  string
+	observedWorkBefore         int64
+	observedWorkAfterAdmission int64
+	completedOutputCharge      int64
 }
 
 // Replay owns lifecycle state on the cluster's event goroutine. Only requests
 // whose prerequisites are satisfied enter the cluster's arrival queue.
 type Replay struct {
-	corpus            *Corpus
-	policy            JoinPolicy
-	deps              []dependency
-	states            []requestState
-	byID              map[string]int
-	started           bool
-	finished          bool
-	engine            EngineTotals
-	engineAvailable   bool
-	endUs             int64
-	ttfts             map[string]float64
-	e2es              map[string]float64
-	metricCompletions map[string]float64
-	arrivals          ArrivalConfig
-	birthUs           []int64
+	corpus             *Corpus
+	policy             JoinPolicy
+	deps               []dependency
+	states             []requestState
+	byID               map[string]int
+	started            bool
+	finished           bool
+	engine             EngineTotals
+	engineAvailable    bool
+	endUs              int64
+	ttfts              map[string]float64
+	e2es               map[string]float64
+	metricCompletions  map[string]float64
+	arrivals           ArrivalConfig
+	birthUs            []int64
+	causalTiers        *CausalTierConfig
+	familyObservedWork []int64
 }
 
 func NewReplay(c *Corpus, cfg Config) (*Replay, error) {
@@ -75,6 +100,20 @@ func NewReplay(c *Corpus, cfg Config) (*Replay, error) {
 	if cfg.Arrivals.Mode == "" {
 		cfg.Arrivals.Mode = "trace"
 	}
+	var causalTiers *CausalTierConfig
+	if cfg.CausalTiers != nil {
+		copy := *cfg.CausalTiers
+		copy.Thresholds = append([]int64(nil), cfg.CausalTiers.Thresholds...)
+		if err := copy.Validate(); err != nil {
+			return nil, err
+		}
+		for _, f := range c.families {
+			if f.sloClass != "" {
+				return nil, fmt.Errorf("causal tiers cannot be combined with trace slo_class")
+			}
+		}
+		causalTiers = &copy
+	}
 	births, err := c.arrivals(cfg.Arrivals)
 	if err != nil {
 		return nil, err
@@ -89,7 +128,9 @@ func NewReplay(c *Corpus, cfg Config) (*Replay, error) {
 			return nil, fmt.Errorf("root arrival exceeds simulation clock")
 		}
 	}
-	x := &Replay{corpus: c, policy: cfg.JoinPolicy, deps: deps, arrivals: cfg.Arrivals, birthUs: births, states: make([]requestState, len(c.requests)), byID: make(map[string]int, len(c.requests))}
+	x := &Replay{corpus: c, policy: cfg.JoinPolicy, deps: deps, arrivals: cfg.Arrivals, birthUs: births,
+		causalTiers: causalTiers, familyObservedWork: make([]int64, len(c.families)),
+		states: make([]requestState, len(c.requests)), byID: make(map[string]int, len(c.requests))}
 	for i, r := range c.requests {
 		x.states[i].state = Pending
 		x.byID[r.id] = i
@@ -128,6 +169,30 @@ func (x *Replay) schedule(i int, due int64) *sim.Request {
 	return s.request
 }
 
+func saturatedAdd(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+func saturatedMul(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
+func causalTier(work int64, thresholds []int64) string {
+	if work <= thresholds[0] {
+		return "P1"
+	}
+	if work <= thresholds[1] {
+		return "P2"
+	}
+	return "P3"
+}
+
 func (x *Replay) Gate(req *sim.Request, now int64) (bool, []*sim.Request) {
 	i, ok := x.byID[req.ID]
 	if !ok || x.finished {
@@ -154,6 +219,14 @@ func (x *Replay) Gate(req *sim.Request, now int64) (bool, []*sim.Request) {
 		return false, nil
 	}
 	r := x.corpus.requests[i]
+	if x.causalTiers != nil {
+		fi := x.corpus.sessions[r.session].family
+		s.observedWorkBefore = x.familyObservedWork[fi]
+		x.familyObservedWork[fi] = saturatedAdd(x.familyObservedWork[fi], int64(r.prompt))
+		s.observedWorkAfterAdmission = x.familyObservedWork[fi]
+		s.tierClass = causalTier(x.familyObservedWork[fi], x.causalTiers.Thresholds)
+		req.SLOClass = s.tierClass
+	}
 	req.InputTokens = make([]sim.TokenID, r.prompt)
 	for block, id := range r.blocks {
 		for j := block * 64; j < (block+1)*64; j++ {
@@ -188,6 +261,12 @@ func (x *Replay) OnComplete(req *sim.Request, now int64) []*sim.Request {
 	r := x.corpus.requests[i]
 	if req.State != sim.StateCompleted || req.LengthCapped || req.GeneratedTokens != r.output {
 		return x.scheduleTerminal(i, now, Failed, "request failed or completed with a different token count")
+	}
+	if x.causalTiers != nil && x.states[i].terminal == nil {
+		fi := x.corpus.sessions[r.session].family
+		charge := saturatedMul(int64(req.GeneratedTokens), x.causalTiers.CompletedOutputWeight)
+		x.familyObservedWork[fi] = saturatedAdd(x.familyObservedWork[fi], charge)
+		x.states[i].completedOutputCharge = charge
 	}
 	return x.scheduleTerminal(i, now, Completed, "")
 }

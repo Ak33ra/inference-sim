@@ -65,6 +65,73 @@ func TestDAGForkJoinAndTokenConservation(t *testing.T) {
 	}
 }
 
+func TestCausalTiersChargePromptsAtAdmissionAndOutputsAfterCompletion(t *testing.T) {
+	c := loadDAGTest(t, forkDAG)
+	x, err := NewReplay(c, Config{CausalTiers: &CausalTierConfig{
+		Thresholds: []int64{100, 300}, CompletedOutputWeight: 10,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := x.Start()[0]
+	if root.SLOClass != "" {
+		t.Fatal("routing class was assigned before the request became observable")
+	}
+	admit(t, x, root)
+	if root.SLOClass != "P1" || x.familyObservedWork[0] != 65 {
+		t.Fatalf("root admission: class=%q work=%d", root.SLOClass, x.familyObservedWork[0])
+	}
+	children := complete(x, root, 10_000_000)
+	if x.familyObservedWork[0] != 85 {
+		t.Fatalf("completed root output was not charged causally: %d", x.familyObservedWork[0])
+	}
+	a, b := findRequest(t, children, "f/2"), findRequest(t, children, "f/1")
+	admit(t, x, a)
+	admit(t, x, b)
+	if a.SLOClass != "P2" || b.SLOClass != "P2" || x.familyObservedWork[0] != 213 {
+		t.Fatalf("child admissions: a=%q b=%q work=%d", a.SLOClass, b.SLOClass, x.familyObservedWork[0])
+	}
+	complete(x, b, 20_000_000)
+	joined := complete(x, a, 30_000_000)
+	if x.familyObservedWork[0] != 243 {
+		t.Fatalf("child output receipts differ: %d", x.familyObservedWork[0])
+	}
+	admit(t, x, joined[0])
+	if joined[0].SLOClass != "P3" || x.familyObservedWork[0] != 308 {
+		t.Fatalf("joined admission: class=%q work=%d", joined[0].SLOClass, x.familyObservedWork[0])
+	}
+	complete(x, joined[0], 40_000_000)
+	report := x.Summary()
+	if report.CausalTiers == nil || report.Families[0].ObservedWork != 318 {
+		t.Fatalf("causal tier audit missing: %+v", report.Families[0])
+	}
+	classes := map[string]string{}
+	for _, request := range report.Requests {
+		classes[request.RequestID] = request.RoutingClass
+	}
+	if classes["f/0"] != "P1" || classes["f/2"] != "P2" || classes["f/1"] != "P2" || classes["f/3"] != "P3" {
+		t.Fatalf("reported routing classes differ: %v", classes)
+	}
+}
+
+func TestCausalTierConfigurationValidation(t *testing.T) {
+	c := loadDAGTest(t, forkDAG)
+	for _, config := range []CausalTierConfig{
+		{}, {Thresholds: []int64{1}, CompletedOutputWeight: 1},
+		{Thresholds: []int64{2, 1}, CompletedOutputWeight: 1},
+		{Thresholds: []int64{1, 2}, CompletedOutputWeight: 0},
+	} {
+		if _, err := NewReplay(c, Config{CausalTiers: &config}); err == nil {
+			t.Fatalf("invalid causal tier config accepted: %+v", config)
+		}
+	}
+	tagged := loadDAGTest(t, strings.Replace(forkDAG, `{"id":"f"`, `{"id":"f","slo_class":"P1"`, 1))
+	config := CausalTierConfig{Thresholds: []int64{1, 2}, CompletedOutputWeight: 1}
+	if _, err := NewReplay(tagged, Config{CausalTiers: &config}); err == nil {
+		t.Fatal("causal tiers silently overrode a trace class")
+	}
+}
+
 func TestDAGValidation(t *testing.T) {
 	cases := map[string]string{
 		"missing id":       strings.Replace(forkDAG, `"req_id":0,`, "", 1),
